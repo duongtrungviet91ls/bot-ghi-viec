@@ -1,1 +1,1 @@
-{"version":"3.6.0","notes":"Tự cập nhật tự động qua GitHub, lệnh bot phiên bản / kiểm tra cập nhật, chặn chạy trùng 2 bot","files":{"bot.js":{"sha256":"eb7d4326209c8a6ec0eb2928dc73bcffbbdc37cc002c30651968a7dee4d5730c"}}}
+{"version":"3.6.1","notes":"Vá QA: tiêu đề lặp tháng không còn dính chữ hạn; đường AI thiếu hạn giữ cờ lặp","files":{"bot.js":{"sha256":"29bdfa2917efdd9b7908148b206230693109e304eff11130c2f55fdccb3cf329"}}}

@@ -1,6 +1,8 @@
 'use strict';
 /*
  * Bot Báo việc MTTQ — bot Zalo ghi việc trong nhóm / chat riêng và nhắc hạn theo giờ hành chính.
+ * v3.6.1: vá nhỏ theo ghi chú QA v3.5 — (1) lặp hằng tháng có chữ "hạn" trước "ngày X"
+ * thì tiêu đề không còn dính "hạn"; (2) đường AI khi thiếu hạn giữ cờ lặp vào pending.
  * v3.6: TỰ CẬP NHẬT — bot tự kiểm tra bản mới trên kho GitHub của chủ bot (version.json),
  * tự tải + kiểm tra mã băm từng file, sao lưu bản cũ, nhờ updater.js thay file và khởi động
  * lại; bản mới lỗi lúc khởi động thì tự quay về bản cũ và nhắn báo. Lệnh: "bot, phiên bản",
@@ -19,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.6.0';
+const BOT_VERSION = '3.6.1';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -261,6 +263,11 @@ function parseAddCommand(rawText, now) {
       due = cand;
       const spans = [[dm.index, dm.index + dm[0].length]];
       if (tm) spans.push([tm.index, tm.index + tm[0].length]);
+      // "hạn"/"trước" đứng ngay trước "ngày X" (vd "hạn ngày 25 hằng tháng 17h"): nhánh
+      // này bỏ qua parseDeadline nên từ khóa không bị cắt như đường thường → cắt riêng
+      // (v3.6.1: trước đây tiêu đề còn dính "hạn" thành "Nộp báo cáo, hạn").
+      const hm = fM.match(/\b(han|truoc)\s*[:：]?\s+(?=ngay\s+\d{1,2}\b)/);
+      if (hm) spans.push([hm.index, hm.index + hm[0].length]);
       spans.sort((a, b) => b[0] - a[0]);
       for (const [s, e] of spans) text = (text.slice(0, s) + ' ' + text.slice(e));
       text = text.replace(/\s{2,}/g, ' ').trim();
@@ -369,7 +376,7 @@ function saveJson(file, data) {
 }
 const tasksFile = path.join(CONFIG.dataDir, 'tasks.json');
 const stateFile = path.join(CONFIG.dataDir, 'state.json');
-let store = loadJson(tasksFile, { chats: {}, pending: {} }); // chats[chatId] = [task], pending["chatId|userId"] = {title, assignee}
+let store = loadJson(tasksFile, { chats: {}, pending: {} }); // chats[chatId] = [task], pending["chatId|userId"] = {title, assignee, recur}
 if (!store.users) store.users = {}; // users[userId] = { name, privateChatId, lastSeen } — nạp 1 lần khi người dùng chat riêng với bot
 if (!store.history) store.history = {}; // history[chatId] = [{r:'u'|'a', t}] — mạch hội thoại của chế độ thư ký
 if (!store.posters) store.posters = []; // posters = [userId] — những người được quyền ra lệnh đăng bài qua bot
@@ -714,7 +721,9 @@ async function handleViaAI(text, chatId, fromName, userId, pKey, now) {
     case 'add_task': {
       if (!ai.title) return false;
       if (!due) {
-        store.pending[pKey] = { title: ai.title, assignee: ai.assignee || fromName };
+        // v3.6.1: giữ cờ lặp vào pending như đường lệnh cứng — không thì khi người dùng
+        // bổ sung hạn sau, việc lặp vô tình thành việc một lần.
+        store.pending[pKey] = { title: ai.title, assignee: ai.assignee || fromName, recur: detectRecur(foldVN(text)) || null };
         saveStore();
         await send(chatId, ai.reply || `Đã nhận việc “${ai.title}” nhưng chưa rõ hạn. Hạn lúc nào anh/chị? (ví dụ: “mai 9h”, “thứ 6 17h”, “25/11”)`);
         return true;
@@ -1601,4 +1610,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
-module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, store, CONFIG };
+module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, store, CONFIG };

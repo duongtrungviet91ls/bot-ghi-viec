@@ -1,7 +1,9 @@
 'use strict';
 // Kiểm thử bộ phân tích hạn + giờ hành chính. Chạy: node test.js
 const assert = require('assert');
-const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, store } = require('./bot.js');
+const fs = require('fs');
+const path = require('path');
+const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, store } = require('./bot.js');
 
 // "Bây giờ" cố định: Thứ 2, 16/11/2026, 09:00
 const NOW = new Date(2026, 10, 16, 9, 0);
@@ -190,7 +192,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(store.briefingLast, undefined, '09:00 không phải giờ bản tin');
   store.briefingLast = new Date(2026, 10, 16, 7, 45).toDateString();
   return morningBriefingTick(new Date(2026, 10, 16, 7, 45));
-}).then(() => {
+}).then(async () => {
   assert.strictEqual(store.briefingLast, new Date(2026, 10, 16, 7, 45).toDateString(), 'đã gửi hôm nay thì không gửi lại');
 
   // --- Việc lặp định kỳ (v3.5) ---
@@ -207,6 +209,11 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(c.title, 'Nộp báo cáo tháng');
   assert.deepStrictEqual(c.recur, { type: 'monthly', label: 'hằng tháng' });
   eq(c.due, 2026, 10, 25, 17, 0);   // "ngày 25" đứng một mình phải ra 25/11, không phải hôm nay
+  // v3.6.1 QA (1): chữ "hạn" đứng trước "ngày 25" cũng phải bị cắt khỏi tiêu đề (trước đây còn dính "hạn").
+  c = parseCommand('bot, ghi việc lặp: Nộp báo cáo, hạn ngày 25 hằng tháng 17h', NOW);
+  assert.strictEqual(c.title, 'Nộp báo cáo');
+  assert.deepStrictEqual(c.recur, { type: 'monthly', label: 'hằng tháng' });
+  eq(c.due, 2026, 10, 25, 17, 0);
   c = parseCommand('bot, ghi việc: Kiểm tra hộp thư, mỗi ngày 9h', NOW);
   assert.strictEqual(c.title, 'Kiểm tra hộp thư');
   assert.deepStrictEqual(c.recur, { type: 'daily', label: 'hằng ngày' });
@@ -226,7 +233,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.6.0');
+  assert.strictEqual(BOT_VERSION, '3.6.1');
   assert.strictEqual(cmpVersion('3.6.0', '3.7.0'), -1);
   assert.strictEqual(cmpVersion('3.7.0', '3.6.0'), 1);
   assert.strictEqual(cmpVersion('3.6.0', '3.6.0'), 0);
@@ -248,6 +255,29 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(isFailedVersion({ version: '3.8.0' }, '3.8.0'), true);   // bản đã lỗi → chặn thử lại (chống vòng lặp quay lui)
   assert.strictEqual(isFailedVersion({ version: '3.8.0' }, '3.8.1'), false);  // bản cao hơn vẫn được lên
   assert.strictEqual(isFailedVersion(null, '3.8.0'), false);
+
+  // --- Vá v3.6.1 (QA) (2): đường AI thiếu hạn — cờ lặp phải vào pending để khi bổ sung
+  // hạn xong việc vẫn lặp (trước đây việc lặp vô tình thành việc một lần).
+  // Gemini + Zalo đều được giả lập bằng fetch stub; data/tasks.json được khôi phục sau test.
+  {
+    const aiJson = JSON.stringify({ action: 'add_task', title: 'Nộp báo cáo', assignee: null, due_text: null, task_ref: null, reply: 'Đã nhận việc, hạn lúc nào?' });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('bot-api.zaloplatforms.com')) return { ok: true, status: 200, json: async () => ({ ok: true, result: {} }) };
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: aiJson }] } }] }) };
+    };
+    const tasksFileTest = path.join(__dirname, 'data', 'tasks.json');
+    const beforeTasks = fs.existsSync(tasksFileTest) ? fs.readFileSync(tasksFileTest, 'utf8') : null;
+    try {
+      const aiOk = await handleViaAI('ghi việc lặp: nộp báo cáo hằng tháng ngày 25', 'chat-test', 'Việt', 'u-test', 'chat-test|u-test', NOW);
+      assert.strictEqual(aiOk, true);
+      assert.deepStrictEqual(store.pending['chat-test|u-test']?.recur, { type: 'monthly', label: 'hằng tháng' });
+    } finally {
+      globalThis.fetch = realFetch;
+      delete store.pending['chat-test|u-test'];
+      if (beforeTasks === null) { try { fs.rmSync(tasksFileTest); } catch {} } else fs.writeFileSync(tasksFileTest, beforeTasks);
+    }
+  }
 
   console.log('✅ Tất cả kiểm thử đạt.');
 }).catch((e) => { console.error(e); process.exit(1); });
