@@ -3,7 +3,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, store } = require('./bot.js');
+const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, store } = require('./bot.js');
 
 // "Bây giờ" cố định: Thứ 2, 16/11/2026, 09:00
 const NOW = new Date(2026, 10, 16, 9, 0);
@@ -233,7 +233,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.6.1');
+  assert.strictEqual(BOT_VERSION, '3.7.0');
   assert.strictEqual(cmpVersion('3.6.0', '3.7.0'), -1);
   assert.strictEqual(cmpVersion('3.7.0', '3.6.0'), 1);
   assert.strictEqual(cmpVersion('3.6.0', '3.6.0'), 0);
@@ -278,6 +278,42 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
       if (beforeTasks === null) { try { fs.rmSync(tasksFileTest); } catch {} } else fs.writeFileSync(tasksFileTest, beforeTasks);
     }
   }
+
+  // --- Tra cứu trực tiếp (v3.7) ---
+  const fxFx = parseFxXml('<ExrateList><DateTime>11/23/2026 6:11:55 PM</DateTime><Exrate CurrencyCode="USD" CurrencyName="US DOLLAR" Buy="25,010.00" Transfer="25,110.00" Sell="25,460.00" /><Exrate CurrencyCode="EUR" CurrencyName="EURO" Buy="27,653.30" Transfer="27,932.63" Sell="29,112.05" /><Exrate CurrencyCode="DKK" CurrencyName="DANISH KRONE" Buy="-" Transfer="3,727.38" Sell="3,870.02" /></ExrateList>');
+  assert.strictEqual(fxFx.datetime, '23/11/2026 18:11'); // giờ Mỹ 6:11 PM → 18:11, ngày/tháng đảo đúng
+  assert.strictEqual(fxFx.rates.length, 3);
+  assert.strictEqual(fxFx.rates[0].code, 'USD');
+  assert.ok(fxText(fxFx, null).includes('USD: mua 25,010.00'));
+  assert.ok(fxText(fxFx, 'EUR').includes('EUR: mua 27,653.30'));
+  assert.strictEqual(fxText(fxFx, 'XXX'), null);
+  assert.strictEqual(parseFxXml('<ExrateList></ExrateList>'), null);
+  assert.strictEqual(fxCodeOf('ty gia do'), 'USD');
+  assert.strictEqual(fxCodeOf('ty gia euro'), 'EUR');
+  assert.strictEqual(fxCodeOf('ty gia nhan dan te'), 'CNY');
+  assert.strictEqual(fxCodeOf('ty gia'), null);
+  c = parseCommand('bot, tỷ giá', NOW); assert.strictEqual(c.type, 'fx'); assert.strictEqual(c.code, null);
+  c = parseCommand('bot, tỷ giá USD', NOW); assert.strictEqual(c.type, 'fx'); assert.strictEqual(c.code, 'USD');
+  c = parseCommand('bot, thời tiết', NOW); assert.strictEqual(c.type, 'weather'); assert.strictEqual(c.place, '');
+  c = parseCommand('bot, thời tiết Hà Nội', NOW); assert.strictEqual(c.type, 'weather'); assert.strictEqual(c.place, 'Hà Nội');
+  c = parseCommand('bot, tin tức', NOW); assert.strictEqual(c.type, 'news');
+  c = parseCommand('bot, tin mới', NOW); assert.strictEqual(c.type, 'news');
+  assert.strictEqual(wmoText(0), 'trời quang');
+  assert.strictEqual(wmoText(61), 'mưa');
+  assert.strictEqual(wmoText(3), 'nhiều mây');
+  const wTxt = weatherText({ current: { temperature_2m: 22.0, weather_code: 3, wind_speed_10m: 10.1 }, daily: { time: ['2026-11-23', '2026-11-24'], temperature_2m_max: [24.9, 18.9], temperature_2m_min: [17.4, 12.1], precipitation_probability_max: [20, 80], weather_code: [3, 61] } }, 'Lạng Sơn');
+  assert.ok(wTxt.includes('22°C') && wTxt.includes('nhiều mây') && wTxt.includes('17–25°C') && wTxt.includes('khả năng mưa 20%') && wTxt.includes('Ngày mai'));
+  const newsItems = parseNewsItems('<rss><channel><item><title>Bàn giao nhà tình nghĩa tại Lạng Sơn - Báo Lạng Sơn</title><link>https://example.com/1</link><pubDate>Sun, 23 Nov 2026 02:30:00 GMT</pubDate><source url="https://baolangson.vn">Báo Lạng Sơn</source></item><item><title>Tin thứ hai không nguồn</title><link>https://example.com/2</link><pubDate>Sat, 22 Nov 2026 09:00:00 GMT</pubDate></item></channel></rss>', 5);
+  assert.strictEqual(newsItems.length, 2);
+  assert.strictEqual(newsItems[0].title, 'Bàn giao nhà tình nghĩa tại Lạng Sơn'); // hậu tố " - Báo" bị cắt vì đã có thẻ source
+  assert.strictEqual(newsItems[0].source, 'Báo Lạng Sơn');
+  assert.strictEqual(newsItems[1].source, '');
+  const nTxt = newsText([{ label: 'Mặt trận & Lạng Sơn', items: newsItems }], NOW);
+  assert.ok(nTxt.includes('📰 Tin mới nhất') && nTxt.includes('Bàn giao nhà tình nghĩa'));
+  assert.strictEqual(isLookupQuestion(foldVN('tỷ giá đô la hôm nay bao nhiêu')), true);
+  assert.strictEqual(isLookupQuestion(foldVN('giá vàng hôm nay')), true);
+  assert.strictEqual(isLookupQuestion(foldVN('tin tức hôm nay có gì')), true);
+  assert.strictEqual(isLookupQuestion(foldVN('soạn giúp tôi công văn này')), false);
 
   console.log('✅ Tất cả kiểm thử đạt.');
 }).catch((e) => { console.error(e); process.exit(1); });

@@ -1,1 +1,1 @@
-{"version":"3.6.1","notes":"Vá QA: tiêu đề lặp tháng không còn dính chữ hạn; đường AI thiếu hạn giữ cờ lặp","files":{"bot.js":{"sha256":"29bdfa2917efdd9b7908148b206230693109e304eff11130c2f55fdccb3cf329"}}}
+{"version":"3.7.0","notes":"Tra cứu trực tiếp: lệnh tỷ giá Vietcombank, thời tiết Open-Meteo, tin tức Google Tin tức; thư ký bị ép tìm web khi hỏi tra cứu và nạp dữ liệu chính thức cho câu tỷ giá/thời tiết","files":{"bot.js":{"sha256":"1c54ee5f63b809c5c7c87e134c5b783a92d567279868ea017d2a94a9888204e4"}}}

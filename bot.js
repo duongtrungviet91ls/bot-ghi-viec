@@ -1,6 +1,12 @@
 'use strict';
 /*
  * Bot Báo việc MTTQ — bot Zalo ghi việc trong nhóm / chat riêng và nhắc hạn theo giờ hành chính.
+ * v3.7: MỞ RỘNG TRA CỨU — lệnh cứng không cần khóa AI: "bot, tỷ giá" (bảng Vietcombank,
+ * nhớ đệm 10 phút vì nguồn chỉ cho gọi 1 lần/5 phút), "bot, thời tiết [nơi]" (Open-Meteo,
+ * mặc định Lạng Sơn), "bot, tin tức" (Google Tin tức: Mặt trận/Lạng Sơn + thời sự nổi bật).
+ * Thư ký: câu hỏi dạng tra cứu (tỷ giá, giá vàng/xăng, thời tiết, tin tức…) bị ÉP tìm web
+ * thay vì để AI tự quyết (bản cũ từng từ chối oan câu tỷ giá bằng một "nguyên tắc" bịa);
+ * hỏi tỷ giá/thời tiết thì nạp thẳng dữ liệu nguồn chính thức vào ngữ cảnh cho AI.
  * v3.6.1: vá nhỏ theo ghi chú QA v3.5 — (1) lặp hằng tháng có chữ "hạn" trước "ngày X"
  * thì tiêu đề không còn dính "hạn"; (2) đường AI khi thiếu hạn giữ cờ lặp vào pending.
  * v3.6: TỰ CẬP NHẬT — bot tự kiểm tra bản mới trên kho GitHub của chủ bot (version.json),
@@ -21,7 +27,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.6.1';
+const BOT_VERSION = '3.7.0';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -41,6 +47,11 @@ const CONFIG = {
   updateFilesBase: process.env.BOT_UPDATE_BASE || 'https://raw.githubusercontent.com/duongtrungviet91ls/bot-ghi-viec/main/',
   updateCheckMs: 6 * 60 * 60 * 1000, // 6 giờ tự kiểm tra bản mới 1 lần (và ngay khi khởi động)
   updateOkDelayMs: Number(process.env.BOT_UPDATE_OK_DELAY_MS || 60000), // chạy ổn đủ lâu thì coi như cập nhật thành công
+  // Tra cứu trực tiếp (v3.7)
+  fxCacheMs: 10 * 60 * 1000,        // Vietcombank chỉ cho gọi 1 lần/5 phút → nhớ đệm 10 phút
+  weatherCacheMs: 15 * 60 * 1000,   // thời tiết nhớ đệm 15 phút cho mỗi địa điểm
+  newsCacheMs: 10 * 60 * 1000,      // tin tức nhớ đệm 10 phút
+  defaultPlace: { name: 'Lạng Sơn', lat: 21.85, lon: 106.76 },
   defaultDueTime: [17, 0],      // Không nói giờ → hạn lúc 17:00 ngày hạn
   pollTimeoutSec: 20,
   reminderTickMs: 60 * 1000,
@@ -321,6 +332,10 @@ function parseCommandInner(rawText, now) {
   if (/^(viec hom nay|viec sang|ban tin sang|hom nay co viec gi|viec can lam hom nay)/.test(f)) return { type: 'briefing' };
   if (/^(phien ban|version)/.test(f)) return { type: 'version' };
   if (/^(kiem tra cap nhat|cap nhat(\s+(di|bot|len))?$)/.test(f)) return { type: 'update' };
+  // Tra cứu trực tiếp (v3.7): lệnh cứng, không cần khóa AI.
+  if (/^(ty gia|ti gia)\b/.test(f)) return { type: 'fx', code: fxCodeOf(f) };
+  if ((m = f.match(/^thoi tiet\b\s*(.*)$/))) return { type: 'weather', place: m[1] ? text.slice(text.length - m[1].length).trim() : '' };
+  if (/^(tin tuc|tin moi|doc bao|tin hom nay)\b/.test(f)) return { type: 'news' };
   if ((m = f.match(/^xong\s+(viec\s*)?(\d+)/)) || (m = f.match(/^da\s+xong\s+(viec\s*)?(\d+)/))) return { type: 'done', n: parseInt(m[2], 10) };
   if ((m = f.match(/^(xoa|huy)\s+(viec\s*)?(\d+)/))) return { type: 'delete', n: parseInt(m[3], 10) };
   if ((m = f.match(/^sua\s+han\s+(viec\s*)?(\d+)\s+(.+)/))) {
@@ -881,6 +896,173 @@ async function fetchPageText(url) {
   const t = stripHtml(html);
   return t ? t.slice(0, 5000) : null;
 }
+async function fetchJson(url, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms || CONFIG.searchTimeoutMs);
+  try { const res = await fetch(url, { signal: ctrl.signal }); if (!res.ok) return null; return await res.json().catch(() => null); }
+  catch { return null; } finally { clearTimeout(timer); }
+}
+
+// ============================== TRA CỨU TRỰC TIẾP (v3.7) ==============================
+// Ba nguồn dữ liệu máy đọc được, chính thức/miễn phí, không cần khóa — các lệnh này là
+// LỆNH CỨNG nên không cần khóa AI vẫn chạy:
+//  - Tỷ giá: XML của Vietcombank (nguồn tự ghi "chỉ 1 lần gọi mỗi 5 phút" → nhớ đệm 10 phút).
+//  - Thời tiết: Open-Meteo (miễn phí, không khóa) — mặc định Lạng Sơn, gõ thêm tên nơi thì tra nơi đó.
+//  - Tin tức: Google Tin tức (RSS) — đã kiểm chứng chạy được với truy vấn tự động.
+function parseFxXml(xml) {
+  const s = String(xml || '');
+  const dtM = s.match(/<DateTime>([^<]+)<\/DateTime>/);
+  let datetime = '';
+  if (dtM) {
+    // Gốc dạng Mỹ "11/23/2026 6:11:55 PM" → hiển thị "23/11/2026 18:11"
+    const m = dtM[1].trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$/i);
+    if (m) { let hh = parseInt(m[4], 10) % 12; if (/pm/i.test(m[7])) hh += 12; datetime = `${m[2].padStart(2, '0')}/${m[1].padStart(2, '0')}/${m[3]} ${String(hh).padStart(2, '0')}:${m[5]}`; }
+    else datetime = dtM[1].trim();
+  }
+  const rates = [];
+  for (const row of s.split('<Exrate ').slice(1)) {
+    const g = (k) => { const mm = row.match(new RegExp(k + '="([^"]*)"')); return mm ? mm[1].trim() : ''; };
+    const code = g('CurrencyCode');
+    if (!code) continue;
+    rates.push({ code, name: g('CurrencyName'), buy: g('Buy'), transfer: g('Transfer'), sell: g('Sell') });
+  }
+  return rates.length ? { datetime, rates } : null;
+}
+const FX_ALIASES = [
+  ['USD', /\b(usd|do la|dola|do my|my kim|do)\b/],
+  ['EUR', /\b(eur|euro)\b/],
+  ['CNY', /\b(cny|nhan dan te|yuan|te trung)\b/],
+  ['JPY', /\b(jpy|yen)\b/],
+  ['GBP', /\b(gbp|bang anh)\b/],
+  ['AUD', /\b(aud|do uc)\b/],
+  ['THB', /\b(thb|baht)\b/],
+  ['KRW', /\b(krw|won)\b/],
+  ['SGD', /\b(sgd|do sing)\b/],
+];
+function fxCodeOf(folded) { for (const [code, re] of FX_ALIASES) if (re.test(folded)) return code; return null; }
+const FX_DEFAULT_CODES = ['USD', 'EUR', 'CNY', 'JPY', 'GBP', 'AUD'];
+function fxText(fx, onlyCode) {
+  if (!fx) return null;
+  const rows = onlyCode ? fx.rates.filter((r) => r.code === onlyCode) : FX_DEFAULT_CODES.map((code) => fx.rates.find((r) => r.code === code)).filter(Boolean);
+  if (!rows.length) return null;
+  const lines = rows.map((r) => `• ${r.code}: mua ${r.buy} · chuyển khoản ${r.transfer} · bán ${r.sell}`);
+  return `💱 Tỷ giá Vietcombank${fx.datetime ? ` (cập nhật ${fx.datetime})` : ''}:\n${lines.join('\n')}\nĐơn vị: đồng Việt Nam. Hỏi riêng một loại: “bot, tỷ giá USD”.`;
+}
+let fxCache = { at: 0, data: null };
+async function getFxRates() {
+  if (fxCache.data && Date.now() - fxCache.at < CONFIG.fxCacheMs) return fxCache.data;
+  const xml = await fetchText('https://portal.vietcombank.com.vn/Usercontrols/TVPortal.TyGia/pXML.aspx');
+  const data = xml ? parseFxXml(xml) : null;
+  if (data) { fxCache = { at: Date.now(), data }; console.log(`[Tỷ giá] Đã nạp bảng Vietcombank (${data.rates.length} ngoại tệ, ${data.datetime})`); }
+  return data;
+}
+
+function wmoText(code) {
+  const c = Number(code);
+  if (c === 0) return 'trời quang';
+  if (c === 1) return 'gần như quang';
+  if (c === 2) return 'có mây từng phần';
+  if (c === 3) return 'nhiều mây';
+  if (c === 45 || c === 48) return 'sương mù';
+  if ([51, 53, 55].includes(c)) return 'mưa phùn';
+  if ([56, 57].includes(c)) return 'mưa phùn đóng băng';
+  if ([61, 63, 65].includes(c)) return 'mưa';
+  if ([66, 67].includes(c)) return 'mưa đóng băng';
+  if ([71, 73, 75, 77].includes(c)) return 'tuyết';
+  if ([80, 81, 82].includes(c)) return 'mưa rào';
+  if ([85, 86].includes(c)) return 'mưa tuyết';
+  if (c === 95) return 'dông';
+  if (c === 96 || c === 99) return 'dông kèm mưa đá';
+  return 'không rõ';
+}
+function weatherText(j, placeName) {
+  if (!j || !j.current || !j.daily || !j.daily.time) return null;
+  const cur = j.current, d = j.daily;
+  const lines = [`🌤 Thời tiết ${placeName} lúc này: ${Math.round(cur.temperature_2m)}°C, ${wmoText(cur.weather_code)}, gió ${Math.round(cur.wind_speed_10m)} km/h.`];
+  if (d.time.length) {
+    const rain = d.precipitation_probability_max && d.precipitation_probability_max[0] != null ? `, khả năng mưa ${d.precipitation_probability_max[0]}%` : '';
+    lines.push(`Hôm nay: ${Math.round(d.temperature_2m_min[0])}–${Math.round(d.temperature_2m_max[0])}°C, ${wmoText(d.weather_code[0])}${rain}.`);
+  }
+  if (d.time.length > 1) lines.push(`Ngày mai: ${Math.round(d.temperature_2m_min[1])}–${Math.round(d.temperature_2m_max[1])}°C, ${wmoText(d.weather_code[1])}.`);
+  lines.push('Nguồn: Open-Meteo.');
+  return lines.join('\n');
+}
+const weatherCache = new Map();
+async function geocodePlace(name) {
+  const j = await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=vi`);
+  const list = (j && j.results) || [];
+  const vn = list.find((r) => r.country_code === 'VN') || list[0];
+  return vn ? { name: vn.name, lat: vn.latitude, lon: vn.longitude } : null;
+}
+async function getWeather(placeName) {
+  let place = CONFIG.defaultPlace;
+  const key = placeName ? foldVN(placeName) : 'lang son';
+  if (placeName && key !== 'lang son') {
+    const g = await geocodePlace(placeName);
+    if (g) place = g; else return null;
+  }
+  const c = weatherCache.get(key);
+  if (c && Date.now() - c.at < CONFIG.weatherCacheMs) return c.text;
+  const j = await fetchJson(`https://api.open-meteo.com/v1/forecast?latitude=${place.lat}&longitude=${place.lon}&current=temperature_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&timezone=Asia%2FBangkok&forecast_days=3`);
+  const text = weatherText(j, place.name);
+  if (text) { weatherCache.set(key, { at: Date.now(), text }); console.log(`[Thời tiết] Đã nạp cho ${place.name}`); }
+  return text;
+}
+
+function parseNewsItems(xml, limit) {
+  const out = [];
+  for (const item of String(xml || '').split('<item>').slice(1)) {
+    const t = item.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/);
+    if (!t) continue;
+    let title = decodeEntities(t[1].trim());
+    const srcM = item.match(/<source[^>]*>([^<]+)<\/source>/);
+    let source = srcM ? decodeEntities(srcM[1].trim()) : '';
+    if (source && title.endsWith(' - ' + source)) title = title.slice(0, -(source.length + 3));
+    else if (!source && title.includes(' - ')) { const parts = title.split(' - '); source = parts.pop(); title = parts.join(' - '); }
+    const p = item.match(/<pubDate>([^<]+)<\/pubDate>/);
+    const when = p ? new Date(p[1].trim()) : null;
+    out.push({ title, source, when: when && !isNaN(when) ? when : null });
+    if (out.length >= (limit || 5)) break;
+  }
+  return out.filter((r) => r.title);
+}
+function newsTimeText(when, now) {
+  if (!when) return '';
+  const dd = (n) => String(n).padStart(2, '0');
+  return when.toDateString() === now.toDateString() ? `${dd(when.getHours())}:${dd(when.getMinutes())}` : `${dd(when.getDate())}/${dd(when.getMonth() + 1)}`;
+}
+function newsText(groups, now) {
+  const parts = ['📰 Tin mới nhất:'];
+  for (const g of groups) {
+    if (!g.items.length) continue;
+    parts.push(`\n— ${g.label}:`);
+    g.items.forEach((it, i) => parts.push(`${i + 1}. ${it.title}${it.source ? ` (${it.source}${it.when ? ', ' + newsTimeText(it.when, now) : ''})` : ''}`));
+  }
+  return parts.length > 1 ? parts.join('\n') : null;
+}
+let newsCache = { at: 0, text: null };
+async function getNewsText(now) {
+  if (newsCache.text && Date.now() - newsCache.at < CONFIG.newsCacheMs) return newsCache.text;
+  const rss = (q) => `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=vi&gl=VN&ceid=VN:vi`;
+  const [mttqXml, lsXml, topXml] = await Promise.all([
+    fetchText(rss('Mặt trận Tổ quốc Lạng Sơn')),
+    fetchText(rss('Lạng Sơn')),
+    fetchText('https://news.google.com/rss?hl=vi&gl=VN&ceid=VN:vi'),
+  ]);
+  const seen = new Set();
+  const pick = (xml, n) => parseNewsItems(xml, 8).filter((it) => { const k = foldVN(it.title); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, n);
+  const text = newsText([
+    { label: 'Mặt trận & Lạng Sơn', items: [...pick(mttqXml, 3), ...pick(lsXml, 3)] },
+    { label: 'Thời sự nổi bật', items: pick(topXml, 5) },
+  ], now);
+  if (text) { newsCache = { at: Date.now(), text }; console.log('[Tin tức] Đã nạp bản tin Google Tin tức'); }
+  return text;
+}
+
+// Câu hỏi dạng tra cứu (số liệu/giá cả/tin tức/thời tiết): thư ký bị ÉP tìm web, không để
+// AI tự quyết định bỏ qua rồi bịa lý do từ chối (đã gặp thật 2026-11-18 với câu tỷ giá).
+const LOOKUP_RE = /(ty gia|ti gia|gia vang|gia xang|gia dau|gia ngoai te|thoi tiet|tin tuc|tin moi|thoi su|gia do|gia usd|gia eur|chung khoan|vn-?index)/;
+function isLookupQuestion(folded) { return LOOKUP_RE.test(folded); }
 
 // ============================== CHẾ ĐỘ THƯ KÝ ==============================
 function pushHistory(chatId, role, text) {
@@ -919,9 +1101,24 @@ async function handleSecretary(text, chatId, fromName) {
       if (page) ctx = `\n\nNội dung trang web người dùng gửi kèm (${urlM[0]}):\n${page}`;
     }
     if (!ctx) {
+      // Tra cứu trực tiếp (v3.7): hỏi tỷ giá/thời tiết thì nạp thẳng dữ liệu nguồn chính
+      // thức làm ngữ cảnh — nhanh và đúng hơn tìm web, khỏi cần AI quyết định tìm hay không.
+      const fSec = foldVN(text);
+      if (/(ty gia|ti gia)/.test(fSec)) {
+        const fx = await getFxRates();
+        if (fx) ctx = `\n\nTỷ giá Vietcombank chính thức (cập nhật ${fx.datetime}, đơn vị đồng Việt Nam):\n` + fx.rates.map((r) => `${r.code}: mua tiền mặt ${r.buy}, mua chuyển khoản ${r.transfer}, bán ${r.sell}`).join('\n');
+      } else if (/thoi tiet/.test(fSec)) {
+        const w = await getWeather(null);
+        if (w) ctx = '\n\nDữ liệu thời tiết vừa lấy từ Open-Meteo:\n' + w;
+      }
+    }
+    if (!ctx) {
       const dec = await secretaryDecideSearch(text, chatId);
-      if (dec && dec.search && dec.query) {
-        const results = await webSearch(dec.query);
+      // Câu hỏi dạng tra cứu thì ÉP tìm web kể cả khi AI phân loại nói không cần — tránh
+      // việc AI bỏ qua tra cứu rồi bịa một "nguyên tắc" để từ chối (đã gặp thật 2026-11-18).
+      const force = isLookupQuestion(foldVN(text));
+      if ((dec && dec.search && dec.query) || force) {
+        const results = await webSearch((dec && dec.query) || text);
         if (results.length) ctx = '\n\nKết quả tra cứu web vừa thực hiện:\n' + results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}\nNguồn: ${r.url}`).join('\n');
         else ctx = '\n\n(Vừa thử tra cứu web nhưng không lấy được kết quả. Hãy nói rõ lần này chưa tra cứu được; chỉ trả lời phần kiến thức chắc chắn và khuyên người dùng kiểm chứng lại các dữ kiện cụ thể.)';
       }
@@ -929,6 +1126,7 @@ async function handleSecretary(text, chatId, fromName) {
     const prompt = `Bạn là "Bot Mặt trận Lạng Sơn" — thư ký AI hỗ trợ một nhóm công tác của Mặt trận Tổ quốc Việt Nam tỉnh Lạng Sơn trên Zalo.
 Hãy trả lời bằng tiếng Việt, đúng mực, hữu ích; súc tích nhưng đủ ý; liệt kê bằng gạch đầu dòng khi cần; KHÔNG dùng bảng và không dùng ký hiệu ** (Zalo hiển thị xấu).
 Nguyên tắc dữ kiện: số điện thoại, địa chỉ, tên người, ngày tháng, số liệu cụ thể CHỈ được lấy từ kết quả tra cứu hoặc nội dung trang kèm theo dưới đây (nếu có). Không có trong đó thì nói rõ là chưa có/chưa tra được — TUYỆT ĐỐI không bịa.
+Bạn CÓ khả năng tra cứu web: hệ thống tự tra cứu và đính kèm kết quả ở dưới khi câu hỏi cần dữ kiện. TUYỆT ĐỐI không tuyên bố những điều sai sự thật về cách bạn vận hành như "tôi không được phép tra cứu", "tôi chỉ dùng tài liệu nội bộ", "tôi không có quyền truy cập internet". Nếu lần này chưa có dữ kiện thì nói thẳng "em chưa tra được" và gợi ý cách hỏi lại.
 Nếu có dùng kết quả tra cứu, ghi nguồn ở cuối câu trả lời, mỗi nguồn một dòng dạng "Nguồn: <đường link>".
 Nếu người dùng nhờ soạn thảo/dịch/tóm tắt thì làm luôn nội dung hoàn chỉnh để họ sao chép sử dụng.
 Ghi việc và nhắc hạn do bộ phận khác của bot phụ trách; đừng tự hứa ghi việc tại đây.
@@ -1365,6 +1563,9 @@ const HELP = `Cách dùng Bot Báo việc:
 • Ghi việc: “bot, ghi việc: Nộp báo cáo TTND, hạn thứ 6 17h”
 • Việc lặp: “bot, ghi việc lặp: Họp giao ban, thứ 2 hằng tuần 8h” (hoặc “ngày 25 hằng tháng”, “hằng ngày”) — báo xong hoặc qua hạn là bot tự sinh kỳ sau; muốn dừng chuỗi thì xóa việc đang mở của chuỗi đó
 • Đăng bài mà Chrome đang tắt: bot tự mở Chrome dạng thu nhỏ cho extension chạy, anh không phải mở sẵn; lệnh kẹt quá 10 phút bot sẽ nhắn cảnh báo
+• Tỷ giá: “bot, tỷ giá” (bảng Vietcombank) hoặc hỏi riêng “bot, tỷ giá USD”
+• Thời tiết: “bot, thời tiết” (Lạng Sơn) hoặc “bot, thời tiết Hà Nội”
+• Tin tức: “bot, tin tức” — tin Mặt trận/Lạng Sơn và thời sự nổi bật mới nhất
 • Phiên bản: “bot, phiên bản” — bot tự cập nhật khi có bản mới; muốn kiểm tra ngay: “bot, kiểm tra cập nhật”
 • Giao cho người khác: “bot, ghi việc giao cho anh Tùng: Kiểm tra máy in, hạn mai 9h”
 • Xem việc: “bot, việc”
@@ -1449,7 +1650,7 @@ async function handleMessage(msg) {
   console.log(`[lệnh] chat=${chatId} → ${cmd.type}`);
   // Lệnh cứng rõ ràng thì chạy ngay (nhanh, miễn phí). Câu mơ hồ / nói tự nhiên / hỏi đáp → nhờ AI hiểu trước;
   // AI lỗi hoặc không có khóa thì quay về hành vi lệnh cứng như cũ.
-  const ruleStrong = ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due);
+  const ruleStrong = ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'fx', 'weather', 'news'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due);
   if (!ruleStrong && AI_KEY) {
     if (await handleViaAI(text, chatId, fromName, userId, pKey, now)) return;
   }
@@ -1470,6 +1671,9 @@ async function handleMessage(msg) {
     case 'briefing': { const t = briefingText(chatId, now); await send(chatId, t || 'Hôm nay không có việc nào đến hạn, cũng không có việc quá hạn.'); break; }
     case 'version': await send(chatId, `🤖 Bot Mặt trận Lạng Sơn — phiên bản v${BOT_VERSION}.\nBot tự kiểm tra bản mới mỗi 6 giờ và tự cập nhật khi có; cần kiểm tra ngay thì gọi “bot, kiểm tra cập nhật”.`); break;
     case 'update': checkForUpdate(chatId).catch((e) => console.error('[Cập nhật] Lỗi:', e.message)); break;
+    case 'fx': { const fx = await getFxRates(); await send(chatId, fx ? (fxText(fx, cmd.code) || 'Loại tiền này không có trong bảng tỷ giá Vietcombank hôm nay.') : 'Chưa lấy được tỷ giá từ Vietcombank lúc này — anh thử lại sau ít phút nhé.'); break; }
+    case 'weather': { const w = await getWeather(cmd.place || null); await send(chatId, w || (cmd.place ? `Chưa tìm thấy địa điểm “${cmd.place}” hoặc chưa lấy được dữ liệu thời tiết — anh thử tên khác nhé.` : 'Chưa lấy được dữ liệu thời tiết lúc này — anh thử lại sau ít phút nhé.')); break; }
+    case 'news': { const n = await getNewsText(now); await send(chatId, n || 'Chưa lấy được tin tức lúc này — anh thử lại sau ít phút nhé.'); break; }
     case 'add': {
       if (!cmd.title) { await send(chatId, 'Anh/chị muốn ghi việc gì? Ví dụ: “bot, ghi việc: Nộp báo cáo, hạn thứ 6”.'); break; }
       if (!cmd.due) {
@@ -1610,4 +1814,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
-module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, store, CONFIG };
+module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, store, CONFIG };
