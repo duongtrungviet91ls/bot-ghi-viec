@@ -16,6 +16,10 @@
  * Thư ký: câu hỏi dạng tra cứu (tỷ giá, giá vàng/xăng, thời tiết, tin tức…) bị ÉP tìm web
  * thay vì để AI tự quyết (bản cũ từng từ chối oan câu tỷ giá bằng một "nguyên tắc" bịa);
  * hỏi tỷ giá/thời tiết thì nạp thẳng dữ liệu nguồn chính thức vào ngữ cảnh cho AI.
+ * v3.9: TỰ CẬP NHẬT EXTENSION ĐĂNG BÀI — bot tải bản extension mới từ cùng kho GitHub
+ * (ext-version.json + file dưới ext/), kiểm mã băm từng file, chép đè vào thư mục
+ * extension đã khai báo 1 lần trong ext-update.json, rồi báo qua cầu nối để extension
+ * tự nạp lại khi rảnh; "bot, kiểm tra cập nhật" cũng kiểm tra luôn extension.
  * v3.6.1: vá nhỏ theo ghi chú QA v3.5 — (1) lặp hằng tháng có chữ "hạn" trước "ngày X"
  * thì tiêu đề không còn dính "hạn"; (2) đường AI khi thiếu hạn giữ cờ lặp vào pending.
  * v3.6: TỰ CẬP NHẬT — bot tự kiểm tra bản mới trên kho GitHub của chủ bot (version.json),
@@ -36,7 +40,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.8.0';
+const BOT_VERSION = '3.9.0';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -56,6 +60,11 @@ const CONFIG = {
   updateFilesBase: process.env.BOT_UPDATE_BASE || 'https://raw.githubusercontent.com/duongtrungviet91ls/bot-ghi-viec/main/',
   updateCheckMs: 6 * 60 * 60 * 1000, // 6 giờ tự kiểm tra bản mới 1 lần (và ngay khi khởi động)
   updateOkDelayMs: Number(process.env.BOT_UPDATE_OK_DELAY_MS || 60000), // chạy ổn đủ lâu thì coi như cập nhật thành công
+  // Tự cập nhật EXTENSION đăng bài (v3.9): bản kê riêng ext-version.json, file nằm dưới ext/ trên cùng kho.
+  // Biến môi trường BOT_EXT_MANIFEST / BOT_EXT_BASE cho phép trỏ sang nguồn khác khi kiểm thử.
+  extManifestUrl: process.env.BOT_EXT_MANIFEST || 'https://raw.githubusercontent.com/duongtrungviet91ls/bot-ghi-viec/main/ext-version.json',
+  extFilesBase: process.env.BOT_EXT_BASE || 'https://raw.githubusercontent.com/duongtrungviet91ls/bot-ghi-viec/main/ext/',
+  extCheckMs: 30 * 60 * 1000, // 30 phút kiểm tra bản extension mới 1 lần
   // Tra cứu trực tiếp (v3.7)
   fxCacheMs: 10 * 60 * 1000,        // Vietcombank chỉ cho gọi 1 lần/5 phút → nhớ đệm 10 phút
   weatherCacheMs: 15 * 60 * 1000,   // thời tiết nhớ đệm 15 phút cho mỗi địa điểm
@@ -1306,7 +1315,10 @@ function startBridge() {
       }
       const jobs = store.postQueue.filter((j) => j.status === 'queued').map((j) => ({ id: j.id, url: j.url, targets: j.targets || null, by: j.by, at: j.at }));
       if (changed) saveStore();
-      reply(200, { ok: true, jobs });
+      // v3.9: extension hỏi kèm phiên bản đang chạy (extv) — bot đã chép bản mới vào thư
+      // mục mà bản đang chạy còn cũ thì báo extUpdate để nó tự nạp lại khi rảnh.
+      const extSig = extSignalFor(u.searchParams.get('extv') || '');
+      reply(200, { ok: true, jobs, ...(extSig ? { extUpdate: extSig } : {}) });
       return;
     }
     const mTake = u.pathname.match(/^\/jobs\/(\d+)\/take$/);
@@ -1554,6 +1566,107 @@ async function checkForUpdate(manualChatId) {
   } finally { updateInProgress = false; }
 }
 
+// ==================== TỰ CẬP NHẬT EXTENSION ĐĂNG BÀI (v3.9) ====================
+// Bot tải bản extension mới từ cùng kho GitHub (ext-version.json + các file dưới ext/),
+// đối chiếu SHA-256 từng file (sai một file là hủy cả đợt), chép đè vào thư mục extension
+// đã khai báo 1 lần trong ext-update.json cạnh bot.js ({"folder": "...", "enabled": true} —
+// tạo bằng file Khai_Bao_Thu_Muc_Extension.bat). Chép xong mới ghi ext-installed.json và
+// báo qua cầu nối /jobs (trường extUpdate) để extension tự nạp lại khi rảnh.
+// Nguyên tắc an toàn:
+//  - "Phiên bản hiện tại" đọc từ manifest.json NGAY TRONG thư mục extension — anh cài tay
+//    bản mới hơn thì bot tôn trọng, không bao giờ chép đè bản cũ lên (không hạ cấp).
+//  - manifest.json được chép CUỐI CÙNG: chép dở thì thư mục vẫn tự khai phiên bản cũ,
+//    đợt kiểm tra sau làm lại từ đầu, extension không nạp phải trạng thái nửa vời.
+// [EXTUPDATE-SECTION]
+const extCfgFile = path.join(__dirname, 'ext-update.json');
+const extInstalledFile = path.join(__dirname, 'ext-installed.json');
+const extStagingDir = path.join(__dirname, 'ext-update-staging');
+let extApplied = readJsonFile(extInstalledFile); // {version, at, folder} | null
+let extCheckAt = 0;
+let extChecking = false;
+
+// Tín hiệu cho cầu nối: bot đã chép bản này mà extension đang chạy còn cũ hơn → báo để nạp lại.
+function extSignalFor(extv) {
+  if (!extApplied || !extApplied.version) return null;
+  if (cmpVersion(extApplied.version, String(extv || '0.0.0')) > 0) return { version: extApplied.version };
+  return null;
+}
+// Bản kê extension hợp lệ: phiên bản x.y.z, có manifest.json, tên file là đường dẫn tương
+// đối an toàn (cho phép thư mục con kiểu icons/icon128.png, cấm "..", cấm tuyệt đối/backslash).
+function validExtManifest(m) {
+  if (!m || typeof m !== 'object') return false;
+  if (!/^\d+\.\d+\.\d+$/.test(String(m.version || ''))) return false;
+  const files = m.files;
+  if (!files || typeof files !== 'object' || !Object.keys(files).length || !files['manifest.json']) return false;
+  return Object.entries(files).every(([name, f]) => {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._\-/]*$/.test(name)) return false;
+    if (name.includes('..') || name.startsWith('/') || name.includes('\\')) return false;
+    return f && /^[0-9a-f]{64}$/.test(String(f.sha256 || ''));
+  });
+}
+function extFolderVersion(folder) {
+  try { const mj = JSON.parse(fs.readFileSync(path.join(folder, 'manifest.json'), 'utf8')); return String(mj.version || ''); }
+  catch { return ''; }
+}
+// Kiểm tra + áp dụng bản extension mới. Trả: 'unconfigured' | 'no-folder' | 'throttled' |
+// 'busy' | 'uptodate' | 'updated' | 'error'. force=true bỏ qua nhịp 30 phút (lệnh tay).
+async function checkExtUpdate(force) {
+  if (extChecking) return 'busy';
+  if (!force && Date.now() - extCheckAt < CONFIG.extCheckMs) return 'throttled';
+  extCheckAt = Date.now();
+  const cfg = readJsonFile(extCfgFile);
+  if (!cfg || cfg.enabled === false || !cfg.folder) return 'unconfigured';
+  const folder = String(cfg.folder);
+  if (!fs.existsSync(folder)) { console.log('[Cập nhật extension] Thư mục đã khai báo không còn tồn tại:', folder); return 'no-folder'; }
+  extChecking = true;
+  try {
+    const raw = await fetchBuf(CONFIG.extManifestUrl + (CONFIG.extManifestUrl.includes('?') ? '&' : '?') + 't=' + Date.now());
+    const m = JSON.parse(raw.toString('utf8'));
+    if (!validExtManifest(m)) throw new Error('bản kê extension không hợp lệ');
+    const cur = extFolderVersion(folder) || (extApplied && extApplied.version) || '0.0.0';
+    if (cmpVersion(m.version, cur) <= 0) {
+      // Đồng bộ sổ đã-áp-dụng theo đúng thư mục thật (anh vừa cài tay bản khác thì sổ theo bản đó).
+      if (!extApplied || extApplied.version !== cur || extApplied.folder !== folder) {
+        extApplied = { version: cur, at: new Date().toISOString(), folder };
+        try { fs.writeFileSync(extInstalledFile, JSON.stringify(extApplied)); } catch {}
+      }
+      return 'uptodate';
+    }
+    console.log(`[Cập nhật extension] Có bản v${m.version} (thư mục đang v${cur}) — tải về…`);
+    fs.rmSync(extStagingDir, { recursive: true, force: true });
+    fs.mkdirSync(extStagingDir, { recursive: true });
+    const names = Object.keys(m.files);
+    for (const name of names) {
+      const buf = await fetchBuf(CONFIG.extFilesBase + name + '?t=' + Date.now());
+      if (sha256hex(buf) !== String(m.files[name].sha256)) throw new Error(`mã băm của ${name} không khớp — hủy cập nhật, lần sau thử lại`);
+      const dest = path.join(extStagingDir, name);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, buf);
+    }
+    const stagedVer = extFolderVersion(extStagingDir);
+    if (stagedVer !== m.version) throw new Error(`bản tải về tự khai phiên bản ${stagedVer || '?'} ≠ bản kê ${m.version} — hủy cập nhật`);
+    // Chép đè vào thư mục thật: manifest.json CUỐI CÙNG (xem nguyên tắc an toàn ở đầu mục).
+    const ordered = names.filter((n) => n !== 'manifest.json').concat(['manifest.json']);
+    for (const name of ordered) {
+      const dest = path.join(folder, name);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(path.join(extStagingDir, name), dest);
+    }
+    extApplied = { version: m.version, at: new Date().toISOString(), folder };
+    try { fs.writeFileSync(extInstalledFile, JSON.stringify(extApplied)); } catch {}
+    try { fs.rmSync(extStagingDir, { recursive: true, force: true }); } catch {}
+    console.log(`[Cập nhật extension] Đã chép bản v${m.version} vào thư mục extension — extension sẽ tự nạp lại qua cầu nối khi rảnh.`);
+    const target = (store.posters && store.posters[0]) || Object.keys(store.chats || {})[0];
+    if (target) await send(target, `🧩 Bot đã tự tải và chép bản extension đăng bài v${m.version} vào thư mục trên máy tính.${m.notes ? `\nNội dung: ${m.notes}` : ''}\nExtension sẽ tự nạp lại khi không bận đăng bài — anh không cần làm gì thêm.`).catch(() => {});
+    return 'updated';
+  } catch (e) {
+    console.error('[Cập nhật extension] Lỗi:', e.message);
+    try { fs.rmSync(extStagingDir, { recursive: true, force: true }); } catch {}
+    return 'error';
+  } finally { extChecking = false; }
+}
+// [/EXTUPDATE-SECTION]
+
 // Sau khi khởi động ổn định: báo kết quả cập nhật (thành công / đã quay lui) cho chủ bot.
 async function notifyUpdateOutcome() {
   const target = (store.posters && store.posters[0]) || Object.keys(store.chats || {})[0];
@@ -1700,7 +1813,7 @@ async function handleMessage(msg) {
     case 'list': await send(chatId, listText(chatId)); break;
     case 'briefing': { const t = briefingText(chatId, now); await send(chatId, t || 'Hôm nay không có việc nào đến hạn, cũng không có việc quá hạn.'); break; }
     case 'version': await send(chatId, `🤖 Bot Mặt trận Lạng Sơn — phiên bản v${BOT_VERSION}.\nBot tự kiểm tra bản mới mỗi 6 giờ và tự cập nhật khi có; cần kiểm tra ngay thì gọi “bot, kiểm tra cập nhật”.`); break;
-    case 'update': checkForUpdate(chatId).catch((e) => console.error('[Cập nhật] Lỗi:', e.message)); break;
+    case 'update': checkForUpdate(chatId).catch((e) => console.error('[Cập nhật] Lỗi:', e.message)); checkExtUpdate(true).catch((e) => console.error('[Cập nhật extension] Lỗi:', e.message)); break;
     case 'fx': { const fx = await getFxRates(); await send(chatId, fx ? (fxText(fx, cmd.code) || 'Loại tiền này không có trong bảng tỷ giá Vietcombank hôm nay.') : 'Chưa lấy được tỷ giá từ Vietcombank lúc này — anh thử lại sau ít phút nhé.'); break; }
     case 'weather': { const w = await getWeather(cmd.place || null); await send(chatId, w || (cmd.place ? `Chưa tìm thấy địa điểm “${cmd.place}” hoặc chưa lấy được dữ liệu thời tiết — anh thử tên khác nhé.` : 'Chưa lấy được dữ liệu thời tiết lúc này — anh thử lại sau ít phút nhé.')); break; }
     case 'news': { const n = await getNewsText(now); await send(chatId, n || 'Chưa lấy được tin tức lúc này — anh thử lại sau ít phút nhé.'); break; }
@@ -1746,6 +1859,7 @@ async function reminderTick() {
   await watchdogTick(now);
   // Tự cập nhật (v3.6): tới hạn 6 giờ thì kiểm tra bản mới 1 lần (lần đầu do main() gọi lúc khởi động).
   if (Date.now() - lastUpdateCheckAt > CONFIG.updateCheckMs) { lastUpdateCheckAt = Date.now(); checkForUpdate(null).catch((e) => console.error('[Cập nhật] Lỗi:', e.message)); }
+  checkExtUpdate(false).catch((e) => console.error('[Cập nhật extension] Lỗi:', e.message)); // v3.9: tự nhịp 30 phút bên trong
   let changed = false;
   for (const chatId of Object.keys(store.chats)) {
     for (const task of store.chats[chatId]) {
@@ -1816,6 +1930,7 @@ async function main() {
   // ghi nhận "ok" cho updater.js và nhắn báo kết quả cập nhật (nếu có) cho chủ bot.
   lastUpdateCheckAt = Date.now();
   checkForUpdate(null).catch((e) => console.error('[Cập nhật] Lỗi:', e.message));
+  checkExtUpdate(false).catch((e) => console.error('[Cập nhật extension] Lỗi:', e.message)); // v3.9: kiểm tra bản extension ngay khi khởi động
   setTimeout(() => { writeUpdateState('ok'); notifyUpdateOutcome().catch((e) => console.error('[Cập nhật] Báo kết quả lỗi:', e.message)); }, CONFIG.updateOkDelayMs);
   setInterval(() => reminderTick().catch((e) => console.error('reminderTick:', e.message)), CONFIG.reminderTickMs);
   console.log('Đang nghe tin nhắn (long polling)… Nhấn Ctrl+C để dừng.');

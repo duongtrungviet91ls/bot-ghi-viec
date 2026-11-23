@@ -233,7 +233,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.8.0');
+  assert.strictEqual(BOT_VERSION, '3.9.0');
   assert.strictEqual(cmpVersion('3.6.0', '3.7.0'), -1);
   assert.strictEqual(cmpVersion('3.7.0', '3.6.0'), 1);
   assert.strictEqual(cmpVersion('3.6.0', '3.6.0'), 0);

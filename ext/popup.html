@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px/1.5 Arial, sans-serif; width: 340px; margin: 0; padding: 12px; color: #222; }
+  h1 { font-size: 14px; margin: 0 0 8px; color: #8C1D2F; }
+  label { display: block; font-weight: bold; margin: 8px 0 3px; }
+  input, select, textarea { width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #bbb; border-radius: 6px; font: inherit; }
+  button#go { width: 100%; margin-top: 12px; padding: 9px; background: #BE1E2D; color: #fff; border: 0; border-radius: 6px; font-weight: bold; cursor: pointer; }
+  button#go:disabled { background: #999; }
+  button#stop { width: 100%; margin-top: 8px; padding: 9px; background: #fff; color: #c62828; border: 2px solid #c62828; border-radius: 6px; font-weight: bold; cursor: pointer; display: none; }
+  button#stop:disabled { color: #999; border-color: #999; }
+  button#repost { width: 100%; margin-top: 8px; padding: 8px; background: #fff8e1; color: #8C1D2F; border: 1.5px solid #B9975B; border-radius: 6px; font-weight: bold; cursor: pointer; display: none; }
+  #status { margin-top: 10px; background: #faf6ef; border: 1px solid #e3d9c6; border-radius: 6px; padding: 8px; white-space: pre-wrap; word-break: break-word; min-height: 34px; }
+  #linkCheck { margin-top: 8px; }
+  .lc-item { border: 1px solid #ddd; border-left: 4px solid #999; border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; background: #fff; word-break: break-word; }
+  .lc-item.ok { border-left-color: #2e7d32; }
+  .lc-item.warn { border-left-color: #e6a100; }
+  .lc-item.err { border-left-color: #c62828; }
+  .lc-title { font-weight: bold; }
+  .lc-meta { color: #555; font-size: 12px; }
+  .lc-badges { margin-top: 3px; font-size: 12px; }
+  .lc-badge { display: inline-block; padding: 1px 6px; border-radius: 8px; background: #f0ede6; margin-right: 4px; }
+  .lc-badge.posted { background: #e0f2e4; color: #1b5e20; font-weight: bold; }
+  .lc-warn { color: #a66a00; font-size: 12px; margin-top: 2px; }
+  .lc-err { color: #c62828; }
+  .lc-retry { color: #8C1D2F; cursor: pointer; text-decoration: underline; font-size: 12px; }
+  .row { display: flex; justify-content: space-between; margin-top: 10px; }
+  a { color: #8C1D2F; cursor: pointer; }
+  .note { color: #666; font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <h1>Tự đăng bài lên MTTQ Lạng Sơn</h1>
+  <label for="url">Link bài nguồn (Báo Lạng Sơn, Báo Đại Đoàn Kết, Báo Dân Trí) — nhiều link thì mỗi link 1 dòng, đăng lần lượt</label>
+  <textarea id="url" rows="3" placeholder="https://baolangson.vn/…"></textarea>
+  <div id="linkCheck"></div>
+  <label>Đăng lên</label>
+  <div style="font-weight:normal">
+    <label style="display:inline;font-weight:normal"><input type="checkbox" id="tMttq" style="width:auto"> Cổng MTTQ Lạng Sơn</label><br>
+    <label style="display:inline;font-weight:normal"><input type="checkbox" id="tZalo" style="width:auto"> Zalo OA “Mặt trận số Xứ Lạng”</label>
+  </div>
+  <label for="cat">Chuyên mục đăng (chỉ cho cổng MTTQ)</label>
+  <select id="cat"></select>
+  <button id="go">Đăng bài ngay</button>
+  <button id="loginCheck" style="width:100%;margin-top:8px;padding:8px;background:#fff;color:#8C1D2F;border:1.5px solid #8C1D2F;border-radius:6px;font-weight:bold;cursor:pointer">🔐 Kiểm tra đăng nhập cổng</button>
+  <button id="stop">⛔ Dừng khẩn cấp — xóa lịch sử bài này, đăng lại từ đầu</button>
+  <button id="repost"></button>
+  <div id="status">Sẵn sàng.</div>
+  <button id="logBtn" style="width:100%;margin-top:8px;padding:7px;background:#fff;color:#8C1D2F;border:1.5px solid #B9975B;border-radius:6px;font-weight:bold;cursor:pointer">📄 Xem log đợt gần nhất</button>
+  <div class="row">
+    <a id="opts">⚙ Cài đặt tài khoản đăng nhập</a>
+    <a id="openPortal">Mở cổng MTTQ</a>
+  </div>
+  <div class="note">Dán link là extension tự kiểm tra trước ngay bên dưới: đọc được bài không, mấy ảnh, đã đăng ở đâu chưa — thấy ổn mới cần bấm Đăng. Extension mở tab nền của từng nơi đã chọn và tự đăng — không giành màn hình, anh cứ làm việc khác. Cổng MTTQ: tự đăng nhập bằng tài khoản đã lưu. Zalo OA: dùng phiên quét QR sẵn trên trình duyệt — nếu hết phiên, hãy mở tab Zalo và quét lại mã QR. Tiến trình hiện ở bảng góc phải trên từng trang và trong thông báo khi xong.</div>
+  <script src="parser.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

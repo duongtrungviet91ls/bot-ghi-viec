@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Cài đặt tài khoản – MTTQ Tự đăng bài</title>
+<style>
+  body { font: 14px/1.6 Arial, sans-serif; max-width: 520px; margin: 30px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 18px; color: #8C1D2F; }
+  label { display: block; font-weight: bold; margin: 12px 0 4px; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #bbb; border-radius: 6px; }
+  button { margin-top: 14px; padding: 8px 16px; border-radius: 6px; border: 0; cursor: pointer; font-weight: bold; }
+  #save { background: #BE1E2D; color: #fff; }
+  #clear { background: #eee; margin-left: 8px; }
+  #botSave { background: #0068FF; color: #fff; }
+  #botMsg { margin-top: 12px; color: #276738; }
+  #msg { margin-top: 12px; color: #276738; }
+  .warn { background: #fff8e6; border: 1px solid #e3d9c6; border-radius: 6px; padding: 10px; margin-top: 16px; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>Tài khoản cổng MTTQ Lạng Sơn</h1>
+  <p>Nhập 1 lần để extension tự đăng nhập khi phiên hết hạn. Thông tin chỉ lưu trong trình duyệt trên máy này.</p>
+  <label for="u">Tài khoản</label>
+  <input id="u" type="text" autocomplete="off">
+  <label for="p">Mật khẩu</label>
+  <input id="p" type="password" autocomplete="new-password">
+  <div>
+    <button id="save">Lưu</button>
+    <button id="clear">Xóa thông tin đã lưu</button>
+  </div>
+  <div id="msg"></div>
+  <div class="warn">⚠ Lưu ý an toàn: mật khẩu được lưu trong vùng lưu trữ của extension trên profile Chrome này. Ai dùng được profile Chrome này trên máy cũng có thể vào cổng MTTQ. Chỉ dùng trên máy cá nhân; khi không cần nữa, bấm “Xóa thông tin đã lưu”.</div>
+
+  <h1 style="margin-top:30px">Zalo OA “Mặt trận số Xứ Lạng”</h1>
+  <p>Zalo OA đăng nhập bằng <b>quét mã QR</b> qua app Zalo trên điện thoại — <b>không có mật khẩu để lưu</b>, nên mục này không có ô nhập gì. Extension dùng phiên đăng nhập Zalo sẵn trong chính Chrome này: anh quét QR đăng nhập 1 lần tại <i>oa.nhatkyzalo.vn</i>, phiên dùng được lâu; khi hết hạn, bảng tiến trình phía Zalo sẽ báo để anh quét lại.</p>
+  <h1 style="margin-top:30px">Thông báo về Zalo cá nhân (Bot Báo việc)</h1>
+  <p>Khi đăng bài xong, extension nhắn thêm 1 tin về <b>Zalo cá nhân</b> của anh qua bot nội bộ. Điều kiện: đã tạo bot theo hướng dẫn riêng (qua OA “Zalo Bot Manager”), đã nhắn <b>/start</b> cho bot 1 lần từ Zalo của anh. Token chỉ lưu trong trình duyệt trên máy này — <b>đừng gửi token qua chat hay cho ai khác</b>.</p>
+  <label for="botToken">Token của bot (dạng bot_id:secret)</label>
+  <input id="botToken" type="password" autocomplete="off" placeholder="Dán token của bot vào đây">
+  <label for="botChat">Chat ID của anh</label>
+  <input id="botChat" type="text" autocomplete="off" placeholder="Bấm “Tự lấy chat_id” sau khi đã nhắn /start cho bot">
+  <div>
+    <button id="botGetChat" type="button">Tự lấy chat_id</button>
+    <button id="botSave" type="button">Lưu thông báo Zalo</button>
+    <button id="botTest" type="button">Gửi tin thử</button>
+    <button id="botClear" type="button">Xóa</button>
+  </div>
+  <div id="botMsg"></div>
+  <div id="botChats"></div>
+
+  <h1 style="margin-top:30px">Đăng bài từ xa qua bot Zalo (cầu nối)</h1>
+  <p>Khi bật mục này, anh chỉ cần <b>nhắn link cho bot “Bot Mặt trận Lạng Sơn” trên Zalo</b> (gõ “đăng bài: &lt;link&gt;”, hoặc chat riêng với bot thì gửi mỗi link) — extension sẽ tự lấy lệnh từ bot và đăng như khi anh bấm trong popup, rồi bot báo kết quả lại vào Zalo. Nơi đăng và chuyên mục lấy theo lựa chọn gần nhất trong popup. Điều kiện: bot đang chạy trên máy này và Chrome đang mở.</p>
+  <label for="bridgeSecret">Mã cầu nối (trong file bridge-secret.txt cạnh file bot.js trên máy)</label>
+  <input id="bridgeSecret" type="password" autocomplete="off" placeholder="Dán mã cầu nối vào đây">
+  <div>
+    <button id="bridgeSave" type="button" style="background:#0068FF;color:#fff">Lưu cầu nối</button>
+    <button id="bridgeTest" type="button">Kiểm tra kết nối</button>
+    <button id="bridgeClear" type="button">Tắt</button>
+  </div>
+  <div id="bridgeMsg" style="margin-top:12px;color:#276738"></div>
+  <script src="options.js"></script>
+</body>
+</html>

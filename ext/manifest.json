@@ -1,0 +1,70 @@
+{
+  "action": {
+    "default_icon": {
+      "128": "icons/icon128.png",
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    },
+    "default_popup": "popup.html",
+    "default_title": "Tự đăng bài MTTQ"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "js": [
+        "parser.js",
+        "content.js"
+      ],
+      "matches": [
+        "https://mttq.langson.gov.vn/*"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "js": [
+        "parser.js",
+        "zalo.js"
+      ],
+      "matches": [
+        "https://oa.nhatkyzalo.vn/*",
+        "https://id.zalo.me/*"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "description": "Dán link bài Báo Lạng Sơn, Đại Đoàn Kết hoặc Dân Trí — popup tự kiểm tra trước (tiêu đề, số ảnh, đã đăng chưa), rồi extension tự đăng lên cổng MTTQ Lạng Sơn và/hoặc Zalo OA Mặt trận số Xứ Lạng. Cổng: tự đăng nhập bằng tài khoản đã lưu; Zalo: dùng phiên quét QR sẵn trên trình duyệt.",
+  "host_permissions": [
+    "http://127.0.0.1:8791/*",
+    "https://mttq.langson.gov.vn/*",
+    "https://baolangson.vn/*",
+    "https://mediabls.mediatech.vn/*",
+    "https://oa.nhatkyzalo.vn/*",
+    "https://id.zalo.me/*",
+    "https://bot-api.zaloplatforms.com/*",
+    "https://daidoanket.vn/*",
+    "https://*.daidoanket.vn/*",
+    "https://dantri.com.vn/*",
+    "https://*.dantri.com.vn/*"
+  ],
+  "icons": {
+    "128": "icons/icon128.png",
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png"
+  },
+  "manifest_version": 3,
+  "name": "MTTQ Lạng Sơn – Tự đăng bài từ link",
+  "options_page": "options.html",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "activeTab",
+    "notifications",
+    "alarms"
+  ],
+  "version": "2.41.0"
+}
