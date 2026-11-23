@@ -1,1 +1,1 @@
-{"version":"3.7.1","notes":"Vá lệnh phiên bản/kiểm tra cập nhật bị lớp AI trả lời thay — từ nay bot đáp đúng số phiên bản","files":{"bot.js":{"sha256":"71f8aea1f8a3e593f3f8abbefb80a59bb4f17f2f1db9586d8577ee421d0d8cd5"}}}
+{"version":"3.8.0","notes":"Tăng tốc trả lời: gộp quyết định tìm web vào cuộc gọi hiểu ý (bớt 1 vòng Gemini mỗi câu thư ký), phân loại tắt suy luận + chờ tối đa 12 giây, xử lý song song giữa các cuộc trò chuyện","files":{"bot.js":{"sha256":"a39329c85fa472d28a9b38902b9a4de382aa0aa061655b449d8b841532f43a0d"}}}

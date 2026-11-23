@@ -3,7 +3,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, store } = require('./bot.js');
+const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, enqueueChatWork, store } = require('./bot.js');
 
 // "Bây giờ" cố định: Thứ 2, 16/11/2026, 09:00
 const NOW = new Date(2026, 10, 16, 9, 0);
@@ -233,7 +233,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.7.1');
+  assert.strictEqual(BOT_VERSION, '3.8.0');
   assert.strictEqual(cmpVersion('3.6.0', '3.7.0'), -1);
   assert.strictEqual(cmpVersion('3.7.0', '3.6.0'), 1);
   assert.strictEqual(cmpVersion('3.6.0', '3.6.0'), 0);
@@ -322,6 +322,50 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(isRuleStrong({ type: 'add', due: new Date() }), true);
   assert.strictEqual(isRuleStrong({ type: 'add', due: null }), false); // ghi việc thiếu hạn vẫn cho AI hiểu câu tự nhiên trước
   assert.strictEqual(isRuleStrong({ type: 'unknown' }), false);
+
+  // --- Tăng tốc (v3.8) ---
+  // (a) Hàng đợi theo chat: cùng chat đúng thứ tự, khác chat chạy song song.
+  {
+    const order = [];
+    let releaseA;
+    const gateA = new Promise((r) => { releaseA = r; });
+    const p1 = enqueueChatWork('chat-q1', async () => { await gateA; order.push('A1'); });
+    const p2 = enqueueChatWork('chat-q1', async () => { order.push('A2'); });
+    const p3 = enqueueChatWork('chat-q2', async () => { order.push('B1'); });
+    await p3; // chat khác không phải chờ A1 đang bị giữ
+    assert.deepStrictEqual(order, ['B1']);
+    releaseA();
+    await Promise.all([p1, p2]);
+    assert.deepStrictEqual(order, ['B1', 'A1', 'A2']); // trong cùng chat: A1 xong mới tới A2
+  }
+  // (b) Thư ký gộp quyết định tìm web vào cuộc gọi hiểu ý: một câu thư ký không tra cứu
+  // chỉ tốn đúng 2 cuộc gọi Gemini (hiểu ý + soạn trả lời) — bản cũ tốn 3 (thêm cuộc
+  // gọi riêng để quyết định tìm web). Đếm số lần gọi generateContent qua fetch stub.
+  {
+    let geminiCalls = 0;
+    let zaloCalls = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('bot-api.zaloplatforms.com')) { zaloCalls++; return { ok: true, status: 200, json: async () => ({ ok: true, result: {} }) }; }
+      geminiCalls++;
+      const text = geminiCalls === 1
+        ? JSON.stringify({ action: 'secretary', title: null, assignee: null, due_text: null, task_ref: null, reply: null, search: false, query: null })
+        : 'Đoạn mở đầu mẫu cho báo cáo.';
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text }] } }] }) };
+    };
+    const tasksFileTest2 = path.join(__dirname, 'data', 'tasks.json');
+    const beforeTasks2 = fs.existsSync(tasksFileTest2) ? fs.readFileSync(tasksFileTest2, 'utf8') : null;
+    try {
+      const secOk = await handleViaAI('soạn giúp tôi đoạn mở đầu báo cáo', 'chat-sec', 'Việt', 'u-sec', 'chat-sec|u-sec', NOW);
+      assert.strictEqual(secOk, true);
+      assert.strictEqual(geminiCalls, 2); // hiểu ý + soạn trả lời, KHÔNG còn cuộc gọi quyết định tìm web riêng
+      assert.ok(zaloCalls >= 1);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete store.history['chat-sec'];
+      if (beforeTasks2 === null) { try { fs.rmSync(tasksFileTest2); } catch {} } else fs.writeFileSync(tasksFileTest2, beforeTasks2);
+    }
+  }
 
   console.log('✅ Tất cả kiểm thử đạt.');
 }).catch((e) => { console.error(e); process.exit(1); });

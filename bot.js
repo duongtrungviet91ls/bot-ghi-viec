@@ -1,6 +1,13 @@
 'use strict';
 /*
  * Bot Báo việc MTTQ — bot Zalo ghi việc trong nhóm / chat riêng và nhắc hạn theo giờ hành chính.
+ * v3.8: TĂNG TỐC TRẢ LỜI — (1) quyết định tìm web của thư ký gộp vào cuộc gọi hiểu ý
+ * (aiUnderstand trả kèm search/query), bỏ hẳn cuộc gọi Gemini riêng secretaryDecideSearch:
+ * mỗi câu thư ký bớt một vòng đi về; (2) cuộc gọi phân loại chạy tắt suy luận
+ * (thinkingBudget 0, model nào từ chối mức ép thì tự thử lại không ép) và chỉ chờ tối đa
+ * 12 giây/model thay vì 30; (3) xử lý tin nhắn song song GIỮA các cuộc trò chuyện bằng
+ * hàng đợi theo chat (trong cùng một chat vẫn đúng thứ tự) — câu thư ký chậm không còn
+ * chặn các tin sau ở chat khác.
  * v3.7.1: vá lệnh "phiên bản"/"kiểm tra cập nhật" bị lớp AI chen vào trả lời thay (hai
  * lệnh này có ở v3.6 nhưng quên xếp vào nhóm lệnh cứng chạy ngay — isRuleStrong).
  * v3.7: MỞ RỘNG TRA CỨU — lệnh cứng không cần khóa AI: "bot, tỷ giá" (bảng Vietcombank,
@@ -29,7 +36,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.7.1';
+const BOT_VERSION = '3.8.0';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -69,6 +76,7 @@ const CONFIG = {
     { id: 'gemini-3.6-flash', thinkingBudget: 256 },
   ],
   aiTimeoutMs: 30000,
+  aiClassifyTimeoutMs: 12000, // cuộc gọi phân loại ý định (v3.8): việc nhẹ, treo quá 12 giây thì chuyển model ngay cho nhanh
   searchTimeoutMs: 9000,   // chờ tối đa cho 1 lần tìm web / đọc trang ở chế độ thư ký
   historyMax: 12,          // số lượt hội thoại thư ký ghi nhớ cho mỗi chat (để hiểu câu hỏi tiếp nối)
   bridgePort: 8791,        // cổng cầu nối ngay trên máy này để extension Chrome lấy lệnh đăng bài (chỉ nghe 127.0.0.1)
@@ -665,7 +673,7 @@ Bối cảnh:
 ${taskLines}
 - Thành viên bot đã biết: ${userNames}.
 
-Mẫu JSON: {"action": "...", "title": string|null, "assignee": string|null, "due_text": string|null, "task_ref": number|null, "reply": string|null}
+Mẫu JSON: {"action": "...", "title": string|null, "assignee": string|null, "due_text": string|null, "task_ref": number|null, "reply": string|null, "search": boolean, "query": string|null}
 
 Quy tắc chọn action:
 - "add_task": người dùng muốn ghi một việc công tác có hạn chót. title = nội dung việc (ngắn gọn, bỏ phần hạn và phần giao việc). assignee = tên người được giao như viết trong câu (vd "anh Tùng"); nếu việc của chính người nhắn thì null. due_text = trích NGUYÊN VĂN đoạn chữ diễn tả thời hạn trong câu (vd "mai 9h", "thứ 6 17h", "25/11", "cuối tháng"); không thấy thời hạn thì null. TUYỆT ĐỐI không tự bịa thời hạn.
@@ -678,6 +686,7 @@ Quy tắc chọn action:
 - "clarify": không đủ thông tin cốt yếu để làm (không rõ việc gì) — reply là một câu hỏi lại lịch sự, ngắn.
 - "chat": chào hỏi, xã giao đơn thuần — reply thân thiện, rất ngắn.
 - "secretary": MỌI yêu cầu còn lại có nội dung — hỏi kiến thức, tra cứu thông tin bên ngoài (số điện thoại, địa chỉ, quy định, tin tức, thời tiết...), soạn thảo văn bản, dịch, tóm tắt, giải thích, tư vấn. Khi phân vân giữa "answer" và "secretary": chỉ dùng "answer" khi câu trả lời nằm trọn trong danh sách việc đã cho ở trên; ngoài ra cứ dùng "secretary".
+- Trường "search"/"query" (quyết định tra cứu web, chỉ có ý nghĩa với action "secretary"; các action khác để search=false, query=null): để search=true khi câu trả lời CẦN dữ kiện tươi bên ngoài — giá cả/tỷ giá/thời tiết/tin tức/sự kiện mới, số điện thoại, địa chỉ, tên người, số liệu cụ thể, thông tin có thể đã thay đổi theo thời gian; khi đó query là cụm từ tìm kiếm ngắn gọn, rõ nghĩa, giữ nguyên tên riêng (tiếng Việt có dấu càng tốt). Để search=false khi chỉ cần kiến thức phổ thông bền vững, soạn thảo, dịch thuật, giải thích khái niệm hoặc tư vấn cách làm.
 
 Ví dụ:
 - "mai 9h nhắc tao qua tỉnh ủy họp giao ban" → {"action":"quick_remind","title":"Qua tỉnh ủy họp giao ban","assignee":null,"due_text":"mai 9h","task_ref":null,"reply":null}
@@ -685,49 +694,62 @@ Ví dụ:
 - "việc nộp báo cáo xong rồi" (nếu đó là việc số 2 trong danh sách) → {"action":"done","title":null,"assignee":null,"due_text":null,"task_ref":2,"reply":null}
 
 Tin nhắn của người dùng: "${text.replace(/"/g, '“')}"`;
-  const raw = await callGemini(prompt, true);
+  // Phân loại là việc nhẹ: tắt suy luận + giới hạn chờ 12 giây/model cho đáp nhanh (v3.8).
+  const raw = await callGemini(prompt, true, { timeoutMs: CONFIG.aiClassifyTimeoutMs, thinkingBudget: 0 });
   const parsed = parseAiJson(raw);
   if (raw && !parsed) console.error('[AI] Không đọc được phản hồi:', String(raw).slice(0, 300));
   return parsed;
 }
 let aiModelWorking = null;
 
-// Gọi Gemini dùng chung cho mọi nhu cầu AI (hiểu lệnh, quyết định tra cứu, thư ký soạn trả lời):
+// Gọi Gemini dùng chung cho mọi nhu cầu AI (hiểu lệnh kiêm quyết định tra cứu, thư ký soạn trả lời):
 // thử lần lượt các model trong CONFIG.aiModels, model nào chạy được thì ghi nhớ dùng tiếp;
 // mọi lỗi (404 model nghỉ hưu, 429 hết hạn mức của model đó, treo quá giờ, lỗi mạng) đều nhảy sang model kế tiếp.
 // jsonMode=true ép trả JSON (nhiệt độ thấp); false trả văn bản tự do.
-async function callGemini(promptText, jsonMode = true) {
+// opts (v3.8): { timeoutMs, thinkingBudget } — thinkingBudget (kể cả 0 = tắt suy luận) GHI ĐÈ mức
+// mặc định của model cho các cuộc gọi phân loại nhẹ; nếu model từ chối mức ép này (lỗi 400 nhắc
+// tới "thinking") thì tự thử lại chính model đó mà không ép, rồi mới chuyển model khác.
+async function callGemini(promptText, jsonMode = true, opts = {}) {
+  const timeoutMs = opts.timeoutMs || CONFIG.aiTimeoutMs;
   const order = aiModelWorking ? [...CONFIG.aiModels.filter((m) => m.id === aiModelWorking), ...CONFIG.aiModels.filter((m) => m.id !== aiModelWorking)] : CONFIG.aiModels;
   for (const spec of order) {
     const model = spec.id;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), CONFIG.aiTimeoutMs);
-    try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-        method: 'POST', signal: ctrl.signal,
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': AI_KEY },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: promptText }] }],
-          generationConfig: {
-            ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
-            temperature: jsonMode ? 0.2 : 0.4,
-            ...(spec.thinkingBudget ? { thinkingConfig: { thinkingBudget: spec.thinkingBudget } } : {}),
-          },
-        }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        const why = res.status === 404 ? 'không còn hoạt động (404)' : `trả lỗi ${res.status}: ${JSON.stringify(data).slice(0, 200)}`;
-        console.error(`[AI] Model ${model} ${why} — thử model khác.`);
-        continue;
-      }
-      if (!aiModelWorking) { aiModelWorking = model; console.log(`[AI] Đang dùng model: ${model}`); }
-      return data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-    } catch (e) {
-      const why = e && e.name === 'AbortError' ? `quá ${Math.round(CONFIG.aiTimeoutMs / 1000)} giây không trả lời` : (e && e.message) || String(e);
-      console.error(`[AI] Model ${model} lỗi: ${why} — thử model khác.`);
-      continue;
-    } finally { clearTimeout(timer); }
+    const budgets = opts.thinkingBudget != null ? [opts.thinkingBudget, undefined] : [undefined];
+    for (const budget of budgets) {
+      const tb = budget !== undefined ? budget : spec.thinkingBudget;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+          method: 'POST', signal: ctrl.signal,
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': AI_KEY },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: promptText }] }],
+            generationConfig: {
+              ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
+              temperature: jsonMode ? 0.2 : 0.4,
+              ...(tb != null ? { thinkingConfig: { thinkingBudget: tb } } : {}),
+            },
+          }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (budget !== undefined && res.status === 400 && /thinking/i.test(JSON.stringify(data || ''))) {
+            console.error(`[AI] Model ${model} không nhận thinkingBudget=${budget} — thử lại không ép thinking.`);
+            continue; // thử lại chính model này ở vòng budgets kế tiếp (không ép)
+          }
+          const why = res.status === 404 ? 'không còn hoạt động (404)' : `trả lỗi ${res.status}: ${JSON.stringify(data).slice(0, 200)}`;
+          console.error(`[AI] Model ${model} ${why} — thử model khác.`);
+          break;
+        }
+        if (!aiModelWorking) { aiModelWorking = model; console.log(`[AI] Đang dùng model: ${model}`); }
+        return data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+      } catch (e) {
+        const why = e && e.name === 'AbortError' ? `quá ${Math.round(timeoutMs / 1000)} giây không trả lời` : (e && e.message) || String(e);
+        console.error(`[AI] Model ${model} lỗi: ${why} — thử model khác.`);
+        break;
+      } finally { clearTimeout(timer); }
+    }
   }
   console.error('[AI] Tất cả model đều không dùng được — bot tạm quay về lệnh cứng.');
   return null;
@@ -788,7 +810,7 @@ async function handleViaAI(text, chatId, fromName, userId, pKey, now) {
       await send(chatId, `✅ Đã đổi hạn việc “${task.title}” → ${fmtDT(due)}.`);
       return true;
     }
-    case 'secretary': return await handleSecretary(text, chatId, fromName);
+    case 'secretary': return await handleSecretary(text, chatId, fromName, ai);
     case 'answer': case 'clarify': case 'chat': {
       if (ai.reply) { await send(chatId, String(ai.reply).slice(0, 1900)); return true; }
       return false;
@@ -1085,23 +1107,10 @@ function historyText(chatId) {
   if (!h.length) return '(chưa có)';
   return h.map((m) => `${m.r === 'u' ? 'Người dùng' : 'Bot'}: ${m.t}`).join('\n');
 }
-// Hỏi AI xem câu này có cần tra cứu web không, và nếu có thì tìm bằng cụm từ nào.
-async function secretaryDecideSearch(text, chatId) {
-  const prompt = `Quyết định xem câu hỏi sau có cần TRA CỨU WEB hay không. Trả về DUY NHẤT JSON {"search": true|false, "query": string|null}.
-Cần tra cứu (search=true) khi câu hỏi đòi hỏi dữ kiện cụ thể/bên ngoài/mới nhất: số điện thoại, địa chỉ, người đứng đầu, quy định/văn bản, tin tức, thời tiết, giá cả, lịch trình, thông tin về một cơ quan/tổ chức/cá nhân cụ thể.
-Không cần (search=false) khi: soạn thảo văn bản, dịch, sửa câu chữ, giải thích kiến thức phổ thông, tính toán, tư vấn cách làm, trò chuyện.
-query: cụm từ tìm kiếm ngắn gọn rõ nghĩa bằng tiếng Việt, suy từ câu hỏi và mạch hội thoại; search=false thì query=null.
-Mạch hội thoại gần đây:
-${historyText(chatId)}
-Câu hỏi: "${text.replace(/"/g, '“')}"`;
-  const raw = await callGemini(prompt, true);
-  if (!raw) return null;
-  const m = String(raw).match(/\{[\s\S]*\}/);
-  if (!m) return null;
-  try { const o = JSON.parse(m[0]); return { search: !!o.search, query: o.query ? String(o.query) : null }; } catch { return null; }
-}
 // Thư ký toàn năng: hỏi đáp tự do + tra cứu ngoài + soạn thảo, có nhớ mạch hội thoại của từng chat.
-async function handleSecretary(text, chatId, fromName) {
+// (v3.8: quyết định tra cứu web được gộp vào cuộc gọi hiểu ý aiUnderstand — intent.search/query —
+// nên hàm secretaryDecideSearch riêng trước đây đã bỏ; mỗi câu thư ký bớt hẳn một vòng Gemini.)
+async function handleSecretary(text, chatId, fromName, intent) {
   try {
     let ctx = '';
     const urlM = text.match(/https?:\/\/[^\s)]+/);
@@ -1122,12 +1131,12 @@ async function handleSecretary(text, chatId, fromName) {
       }
     }
     if (!ctx) {
-      const dec = await secretaryDecideSearch(text, chatId);
-      // Câu hỏi dạng tra cứu thì ÉP tìm web kể cả khi AI phân loại nói không cần — tránh
-      // việc AI bỏ qua tra cứu rồi bịa một "nguyên tắc" để từ chối (đã gặp thật 2026-11-18).
+      // Quyết định tìm web lấy từ chính cuộc gọi hiểu ý (intent.search/query) — không gọi
+      // thêm Gemini. Câu hỏi dạng tra cứu thì ÉP tìm web kể cả khi AI phân loại nói không
+      // cần — tránh việc AI bỏ qua tra cứu rồi bịa một "nguyên tắc" để từ chối (2026-11-18).
       const force = isLookupQuestion(foldVN(text));
-      if ((dec && dec.search && dec.query) || force) {
-        const results = await webSearch((dec && dec.query) || text);
+      if (force || (intent && intent.search)) {
+        const results = await webSearch((intent && intent.query) || text);
         if (results.length) ctx = '\n\nKết quả tra cứu web vừa thực hiện:\n' + results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}\nNguồn: ${r.url}`).join('\n');
         else ctx = '\n\n(Vừa thử tra cứu web nhưng không lấy được kết quả. Hãy nói rõ lần này chưa tra cứu được; chỉ trả lời phần kiến thức chắc chắn và khuyên người dùng kiểm chứng lại các dữ kiện cụ thể.)';
       }
@@ -1443,6 +1452,18 @@ const updateFailedFile = path.join(__dirname, 'update-failed.json'); // phiên b
 let lastUpdateCheckAt = 0;
 let updateInProgress = false;
 let inFlightMessages = 0; // số tin đang xử lý dở — chờ về 0 mới thoát để cập nhật
+// Hàng đợi theo từng chat (v3.8): tin trong CÙNG một cuộc trò chuyện vẫn xử lý đúng thứ tự
+// (luồng bổ sung hạn chờ tin trước hoàn tất), nhưng các cuộc trò chuyện KHÁC nhau chạy song
+// song — một câu thư ký AI chậm ở nhóm này không còn chặn lệnh nhanh ở chat riêng như trước.
+const chatChains = new Map();
+function enqueueChatWork(chatId, fn) {
+  const key = chatId || '?';
+  const prev = chatChains.get(key) || Promise.resolve();
+  const run = prev.then(() => fn(), () => fn());
+  chatChains.set(key, run);
+  run.finally(() => { if (chatChains.get(key) === run) chatChains.delete(key); });
+  return run;
+}
 
 function cmpVersion(a, b) {
   const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
@@ -1808,11 +1829,16 @@ async function main() {
         if (mid && state.seen.includes(mid)) continue;
         // Nhật ký chẩn đoán: mọi tin bot nhận được đều in ra cửa sổ để đối soát với Zalo
         console.log(`[tin mới] event=${u.event_name ?? '?'} chat=${msg?.chat?.id ?? '?'} (${msg?.chat?.chat_type ?? '?'}) từ=${msg?.from?.display_name ?? '?'}: ${JSON.stringify((msg?.text ?? '').slice(0, 100))}`);
+        // Không await ở vòng lặp: giao việc vào hàng đợi của chat đó rồi nhận tin tiếp ngay
+        // (xử lý song song giữa các chat — xem enqueueChatWork). inFlightMessages tăng ngay
+        // khi xếp hàng và giảm khi việc chạy xong thật, để updater vẫn chờ xả hết việc dở.
         inFlightMessages++;
-        try {
-          if (msg && msg.text) await handleMessage(msg).catch((e) => console.error('handleMessage:', e.message));
-          else if (msg && u.event_name === 'message.unsupported.received') await handleUnsupported(msg).catch((e) => console.error('handleUnsupported:', e.message));
-        } finally { inFlightMessages--; }
+        enqueueChatWork(msg?.chat?.id, async () => {
+          try {
+            if (msg && msg.text) await handleMessage(msg).catch((e) => console.error('handleMessage:', e.message));
+            else if (msg && u.event_name === 'message.unsupported.received') await handleUnsupported(msg).catch((e) => console.error('handleUnsupported:', e.message));
+          } finally { inFlightMessages--; }
+        });
         if (mid) { state.seen.push(mid); if (state.seen.length > 500) state.seen = state.seen.slice(-500); saveState(); }
       }
     } catch (e) {
@@ -1823,4 +1849,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
-module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, store, CONFIG };
+module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, enqueueChatWork, store, CONFIG };
