@@ -1,6 +1,8 @@
 'use strict';
 /*
  * Bot Báo việc MTTQ — bot Zalo ghi việc trong nhóm / chat riêng và nhắc hạn theo giờ hành chính.
+ * v3.7.1: vá lệnh "phiên bản"/"kiểm tra cập nhật" bị lớp AI chen vào trả lời thay (hai
+ * lệnh này có ở v3.6 nhưng quên xếp vào nhóm lệnh cứng chạy ngay — isRuleStrong).
  * v3.7: MỞ RỘNG TRA CỨU — lệnh cứng không cần khóa AI: "bot, tỷ giá" (bảng Vietcombank,
  * nhớ đệm 10 phút vì nguồn chỉ cho gọi 1 lần/5 phút), "bot, thời tiết [nơi]" (Open-Meteo,
  * mặc định Lạng Sơn), "bot, tin tức" (Google Tin tức: Mặt trận/Lạng Sơn + thời sự nổi bật).
@@ -27,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.7.0';
+const BOT_VERSION = '3.7.1';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -320,6 +322,13 @@ function parseAddCommand(rawText, now) {
 
   const title = text.replace(/^[:：\-\s]+/, '').replace(/[,;\s]+$/, '').trim();
   return { title: title ? title[0].toUpperCase() + title.slice(1) : '', assignee, due, recur };
+}
+
+// Lệnh cứng "mạnh": chạy ngay, KHÔNG qua lớp AI. Mọi lệnh có case trong handleMessage đều
+// phải có mặt ở đây — thiếu là AI chen vào trả lời thay (đã gặp thật 2026-11-23: lệnh
+// "phiên bản" và "kiểm tra cập nhật" bị thư ký AI trả lời văn hoa thay vì chạy lệnh, v3.7.1 vá).
+function isRuleStrong(cmd) {
+  return ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'fx', 'weather', 'news'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due);
 }
 
 function parseCommandInner(rawText, now) {
@@ -1650,7 +1659,7 @@ async function handleMessage(msg) {
   console.log(`[lệnh] chat=${chatId} → ${cmd.type}`);
   // Lệnh cứng rõ ràng thì chạy ngay (nhanh, miễn phí). Câu mơ hồ / nói tự nhiên / hỏi đáp → nhờ AI hiểu trước;
   // AI lỗi hoặc không có khóa thì quay về hành vi lệnh cứng như cũ.
-  const ruleStrong = ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'fx', 'weather', 'news'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due);
+  const ruleStrong = isRuleStrong(cmd);
   if (!ruleStrong && AI_KEY) {
     if (await handleViaAI(text, chatId, fromName, userId, pKey, now)) return;
   }
@@ -1814,4 +1823,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
-module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, store, CONFIG };
+module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, store, CONFIG };

@@ -3,7 +3,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, store } = require('./bot.js');
+const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, store } = require('./bot.js');
 
 // "Bây giờ" cố định: Thứ 2, 16/11/2026, 09:00
 const NOW = new Date(2026, 10, 16, 9, 0);
@@ -233,7 +233,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.7.0');
+  assert.strictEqual(BOT_VERSION, '3.7.1');
   assert.strictEqual(cmpVersion('3.6.0', '3.7.0'), -1);
   assert.strictEqual(cmpVersion('3.7.0', '3.6.0'), 1);
   assert.strictEqual(cmpVersion('3.6.0', '3.6.0'), 0);
@@ -314,6 +314,14 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(isLookupQuestion(foldVN('giá vàng hôm nay')), true);
   assert.strictEqual(isLookupQuestion(foldVN('tin tức hôm nay có gì')), true);
   assert.strictEqual(isLookupQuestion(foldVN('soạn giúp tôi công văn này')), false);
+  // v3.7.1: MỌI lệnh có case xử lý đều phải là lệnh cứng chạy ngay — thiếu là AI chen vào
+  // trả lời thay (đã gặp thật: "bot, phiên bản" bị thư ký AI đáp văn hoa, không ra số bản).
+  for (const t of ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'fx', 'weather', 'news']) {
+    assert.strictEqual(isRuleStrong({ type: t }), true, `lệnh ${t} phải là lệnh cứng`);
+  }
+  assert.strictEqual(isRuleStrong({ type: 'add', due: new Date() }), true);
+  assert.strictEqual(isRuleStrong({ type: 'add', due: null }), false); // ghi việc thiếu hạn vẫn cho AI hiểu câu tự nhiên trước
+  assert.strictEqual(isRuleStrong({ type: 'unknown' }), false);
 
   console.log('✅ Tất cả kiểm thử đạt.');
 }).catch((e) => { console.error(e); process.exit(1); });

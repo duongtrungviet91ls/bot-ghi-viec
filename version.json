@@ -1,1 +1,1 @@
-{"version":"3.7.0","notes":"Tra cứu trực tiếp: lệnh tỷ giá Vietcombank, thời tiết Open-Meteo, tin tức Google Tin tức; thư ký bị ép tìm web khi hỏi tra cứu và nạp dữ liệu chính thức cho câu tỷ giá/thời tiết","files":{"bot.js":{"sha256":"1c54ee5f63b809c5c7c87e134c5b783a92d567279868ea017d2a94a9888204e4"}}}
+{"version":"3.7.1","notes":"Vá lệnh phiên bản/kiểm tra cập nhật bị lớp AI trả lời thay — từ nay bot đáp đúng số phiên bản","files":{"bot.js":{"sha256":"71f8aea1f8a3e593f3f8abbefb80a59bb4f17f2f1db9586d8577ee421d0d8cd5"}}}
