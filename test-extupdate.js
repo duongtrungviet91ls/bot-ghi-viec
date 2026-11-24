@@ -1,7 +1,10 @@
-// Kiểm thử mục TỰ CẬP NHẬT EXTENSION (v3.9) của bot.js: trích đúng đoạn code thật
-// (giữa hai mốc [EXTUPDATE-SECTION]) và chạy với kho GitHub giả lập trên đĩa.
-// 5 ca: chưa khai báo thư mục / đã mới nhất / có bản mới → chép đúng + báo tín hiệu /
-// sai mã băm → hủy, thư mục nguyên vẹn / thư mục đã mới hơn (cài tay) → không hạ cấp.
+// Kiểm thử mục TỰ CẬP NHẬT EXTENSION (v3.9) + LỆNH TRẠNG THÁI (v3.10) của bot.js:
+// trích đúng đoạn code thật (giữa hai mốc [EXTUPDATE-SECTION]) và chạy với kho GitHub
+// giả lập trên đĩa.
+// 5 ca cập nhật: chưa khai báo thư mục / đã mới nhất / có bản mới → chép đúng + báo tín
+// hiệu / sai mã băm → hủy, thư mục nguyên vẹn / thư mục mới hơn (cài tay) → không hạ cấp.
+// 4 ca trạng thái: chưa ghé lần nào / đang sống + đếm hàng lệnh / mất tín hiệu /
+// cập nhật đang chờ nạp rồi khớp.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -61,10 +64,12 @@ function setup(repoVersion, opts) {
     if (clean.startsWith(CONFIG.extFilesBase)) return fs.readFileSync(path.join(repoDir, 'ext', clean.slice(CONFIG.extFilesBase.length)));
     throw new Error('URL lạ: ' + url);
   };
-  const factory = new Function('fs', 'path', '__dirname', 'CONFIG', 'fetchBuf', 'send', 'store', 'readJsonFile', 'cmpVersion', 'sha256hex',
-    region + '\nreturn { checkExtUpdate, extSignalFor, validExtManifest };');
-  const api = factory(fs, path, botDir, CONFIG, fetchBuf, async (to, text) => { sent.push({ to, text }); }, { posters: ['owner1'], chats: {} }, readJsonFile, cmpVersion, sha256hex);
-  return { root, botDir, extDir, api, sent };
+  const store = { posters: ['owner1'], chats: {}, postQueue: [] };
+  const bridgeWatch = { lastPollAt: 0, lastLaunchAt: 0, extVersion: '' };
+  const factory = new Function('fs', 'path', '__dirname', 'CONFIG', 'fetchBuf', 'send', 'store', 'readJsonFile', 'cmpVersion', 'sha256hex', 'bridgeWatch',
+    region + '\nreturn { checkExtUpdate, extSignalFor, validExtManifest, bridgeStatusText };');
+  const api = factory(fs, path, botDir, CONFIG, fetchBuf, async (to, text) => { sent.push({ to, text }); }, store, readJsonFile, cmpVersion, sha256hex, bridgeWatch);
+  return { root, botDir, extDir, api, sent, store, bridgeWatch };
 }
 
 (async () => {
@@ -116,6 +121,47 @@ function setup(repoVersion, opts) {
     check('trả uptodate', r === 'uptodate', r);
     check('manifest.json vẫn 2.42.0', JSON.parse(fs.readFileSync(path.join(s.extDir, 'manifest.json'), 'utf8')).version === '2.42.0');
     check('background.js không bị chép đè', fs.readFileSync(path.join(s.extDir, 'background.js'), 'utf8') === 'OLD-BG');
+  }
+  console.log('== Ca 6 (trạng thái): extension chưa ghé cầu nối lần nào ==');
+  {
+    const s = setup('2.41.0', { unconfigured: true });
+    const t = s.api.bridgeStatusText(Date.now());
+    check('báo CHƯA THẤY GHÉ CẦU NỐI', t.includes('CHƯA THẤY GHÉ CẦU NỐI LẦN NÀO'), t);
+    check('báo chưa khai báo thư mục', t.includes('chưa khai báo thư mục'), t);
+    check('hàng lệnh 0 chờ · 0 chạy', t.includes('0 đang chờ · 0 đang chạy'), t);
+  }
+  console.log('== Ca 7 (trạng thái): đang sống, có phiên bản, đếm đúng hàng lệnh ==');
+  {
+    const s = setup('2.41.0');
+    s.bridgeWatch.lastPollAt = Date.now() - 50 * 1000;
+    s.bridgeWatch.extVersion = '2.41.0';
+    s.store.postQueue = [{ status: 'queued' }, { status: 'running' }, { status: 'done' }];
+    const t = s.api.bridgeStatusText(Date.now());
+    check('báo ĐANG SỐNG', t.includes('ĐANG SỐNG'), t);
+    check('kèm phiên bản v2.41.0', t.includes('v2.41.0'), t);
+    check('đếm 1 đang chờ · 1 đang chạy', t.includes('1 đang chờ · 1 đang chạy'), t);
+  }
+  console.log('== Ca 8 (trạng thái): mất tín hiệu 30 phút ==');
+  {
+    const s = setup('2.41.0');
+    s.bridgeWatch.lastPollAt = Date.now() - 30 * 60 * 1000;
+    s.bridgeWatch.extVersion = '2.41.0';
+    const t = s.api.bridgeStatusText(Date.now());
+    check('báo MẤT TÍN HIỆU', t.includes('MẤT TÍN HIỆU'), t);
+    check('nhắc trực ban tự mở lại Chrome', t.includes('tự mở lại Chrome'), t);
+    check('ghi 30 phút trước', t.includes('30 phút trước'), t);
+  }
+  console.log('== Ca 9 (trạng thái): cập nhật chờ nạp → nạp xong thì khớp ==');
+  {
+    const s = setup('2.41.0'); // thư mục đang 2.40.0, kho có 2.41.0
+    await s.api.checkExtUpdate(true); // bot chép 2.41.0 vào thư mục
+    s.bridgeWatch.lastPollAt = Date.now();
+    s.bridgeWatch.extVersion = '2.40.0'; // extension vẫn chạy bản cũ
+    let t = s.api.bridgeStatusText(Date.now());
+    check('báo sẽ tự nạp bản mới khi rảnh', t.includes('sẽ tự nạp bản mới khi rảnh'), t);
+    s.bridgeWatch.extVersion = '2.41.0'; // extension đã nạp lại
+    t = s.api.bridgeStatusText(Date.now());
+    check('báo khớp, không có gì chờ nạp', t.includes('khớp, không có gì chờ nạp'), t);
   }
   console.log('\nKẾT QUẢ: ' + pass + ' đạt, ' + fail + ' lỗi');
   process.exit(fail ? 1 : 0);

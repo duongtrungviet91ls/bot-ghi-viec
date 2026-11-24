@@ -16,6 +16,9 @@
  * Thư ký: câu hỏi dạng tra cứu (tỷ giá, giá vàng/xăng, thời tiết, tin tức…) bị ÉP tìm web
  * thay vì để AI tự quyết (bản cũ từng từ chối oan câu tỷ giá bằng một "nguyên tắc" bịa);
  * hỏi tỷ giá/thời tiết thì nạp thẳng dữ liệu nguồn chính thức vào ngữ cảnh cho AI.
+ * v3.10: lệnh "bot, trạng thái" — bot báo extension còn sống hay mất tín hiệu (theo nhịp
+ * ghé cầu nối + phiên bản extension gửi kèm từ v2.41), lệnh đăng đang chờ/đang chạy,
+ * và tình trạng cập nhật extension.
  * v3.9: TỰ CẬP NHẬT EXTENSION ĐĂNG BÀI — bot tải bản extension mới từ cùng kho GitHub
  * (ext-version.json + file dưới ext/), kiểm mã băm từng file, chép đè vào thư mục
  * extension đã khai báo 1 lần trong ext-update.json, rồi báo qua cầu nối để extension
@@ -40,7 +43,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.9.0';
+const BOT_VERSION = '3.10.0';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -345,7 +348,7 @@ function parseAddCommand(rawText, now) {
 // phải có mặt ở đây — thiếu là AI chen vào trả lời thay (đã gặp thật 2026-11-23: lệnh
 // "phiên bản" và "kiểm tra cập nhật" bị thư ký AI trả lời văn hoa thay vì chạy lệnh, v3.7.1 vá).
 function isRuleStrong(cmd) {
-  return ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'fx', 'weather', 'news'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due);
+  return ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'status', 'fx', 'weather', 'news'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due);
 }
 
 function parseCommandInner(rawText, now) {
@@ -358,6 +361,7 @@ function parseCommandInner(rawText, now) {
   if (/^(viec hom nay|viec sang|ban tin sang|hom nay co viec gi|viec can lam hom nay)/.test(f)) return { type: 'briefing' };
   if (/^(phien ban|version)/.test(f)) return { type: 'version' };
   if (/^(kiem tra cap nhat|cap nhat(\s+(di|bot|len))?$)/.test(f)) return { type: 'update' };
+  if (/^(trang thai|status)/.test(f)) return { type: 'status' };
   // Tra cứu trực tiếp (v3.7): lệnh cứng, không cần khóa AI.
   if (/^(ty gia|ti gia)\b/.test(f)) return { type: 'fx', code: fxCodeOf(f) };
   if ((m = f.match(/^thoi tiet\b\s*(.*)$/))) return { type: 'weather', place: m[1] ? text.slice(text.length - m[1].length).trim() : '' };
@@ -1317,7 +1321,10 @@ function startBridge() {
       if (changed) saveStore();
       // v3.9: extension hỏi kèm phiên bản đang chạy (extv) — bot đã chép bản mới vào thư
       // mục mà bản đang chạy còn cũ thì báo extUpdate để nó tự nạp lại khi rảnh.
-      const extSig = extSignalFor(u.searchParams.get('extv') || '');
+      // v3.10: nhớ luôn phiên bản extension gần nhất để lệnh "bot, trạng thái" có số liệu.
+      const extv = u.searchParams.get('extv') || '';
+      if (extv) bridgeWatch.extVersion = extv;
+      const extSig = extSignalFor(extv);
       reply(200, { ok: true, jobs, ...(extSig ? { extUpdate: extSig } : {}) });
       return;
     }
@@ -1384,7 +1391,7 @@ function startBridge() {
 //     đúng chat đã ra lệnh (nghi extension bị tắt/gỡ — bot không tự bật lại extension được).
 // Chỉ chạy trên Windows (máy của chủ bot); hệ điều hành khác thì bỏ qua lặng lẽ.
 const { execFile, exec, spawn } = require('child_process');
-const bridgeWatch = { lastPollAt: 0, lastLaunchAt: 0 };
+const bridgeWatch = { lastPollAt: 0, lastLaunchAt: 0, extVersion: '' };
 // Hàm quyết định THUẦN (có kiểm thử): nhìn đồng hồ + sổ ghé thăm → hành động.
 function watchdogDecision(o) {
   if (!o.jobAtMs) return 'none';
@@ -1665,6 +1672,40 @@ async function checkExtUpdate(force) {
     return 'error';
   } finally { extChecking = false; }
 }
+// Soạn báo cáo trạng thái cho lệnh "bot, trạng thái" (v3.10): extension còn sống hay mất
+// tín hiệu (theo nhịp ghé cầu nối — extension ghé mỗi phút, quá 3 phút không thấy = mất),
+// hàng lệnh đăng bài, và tình trạng cập nhật extension.
+function bridgeStatusText(nowMs) {
+  const lines = [];
+  const pad = (n) => String(n).padStart(2, '0');
+  const last = bridgeWatch.lastPollAt || 0;
+  const verTxt = bridgeWatch.extVersion ? 'v' + bridgeWatch.extVersion : '(chưa rõ phiên bản)';
+  if (!last) {
+    lines.push('🧩 Extension đăng bài ' + verTxt + ': CHƯA THẤY GHÉ CẦU NỐI LẦN NÀO — Chrome đang tắt, hoặc extension chưa cài/chưa nhập mã cầu nối.');
+  } else {
+    const d = new Date(last);
+    const sameDay = new Date(nowMs).toDateString() === d.toDateString();
+    const when = (sameDay ? '' : pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + ' ') + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    const mins = Math.floor((nowMs - last) / 60000);
+    const ago = mins <= 0 ? 'chưa đầy 1 phút trước' : mins < 60 ? mins + ' phút trước' : Math.floor(mins / 60) + ' giờ ' + (mins % 60) + ' phút trước';
+    const alive = nowMs - last < 3 * 60 * 1000;
+    lines.push('🧩 Extension đăng bài ' + verTxt + ': ' + (alive ? 'ĐANG SỐNG ✅' : 'MẤT TÍN HIỆU ❌') + ' — ghé cầu nối gần nhất lúc ' + when + ' (' + ago + ').');
+    if (!alive) lines.push('Chrome có thể đang tắt — có lệnh đăng đang chờ thì bot sẽ tự mở lại Chrome (trực ban), anh không phải lo.');
+  }
+  const queued = store.postQueue.filter((j) => j.status === 'queued').length;
+  const running = store.postQueue.filter((j) => j.status === 'running').length;
+  lines.push('📰 Lệnh đăng bài: ' + queued + ' đang chờ · ' + running + ' đang chạy.');
+  if (extApplied && extApplied.version) {
+    if (bridgeWatch.extVersion && cmpVersion(extApplied.version, bridgeWatch.extVersion) > 0) {
+      lines.push('🔄 Cập nhật extension: bot đã chép v' + extApplied.version + ' vào thư mục, extension đang chạy v' + bridgeWatch.extVersion + ' — sẽ tự nạp bản mới khi rảnh.');
+    } else {
+      lines.push('🔄 Cập nhật extension: đang ở v' + extApplied.version + ' (bản bot đã chép/cài gần nhất) — khớp, không có gì chờ nạp.');
+    }
+  } else {
+    lines.push('🔄 Cập nhật extension: chưa khai báo thư mục (chạy file Khai_Bao_Thu_Muc_Extension.bat 1 lần trong thư mục bot).');
+  }
+  return lines.join('\n');
+}
 // [/EXTUPDATE-SECTION]
 
 // Sau khi khởi động ổn định: báo kết quả cập nhật (thành công / đã quay lui) cho chủ bot.
@@ -1710,6 +1751,7 @@ const HELP = `Cách dùng Bot Báo việc:
 • Thời tiết: “bot, thời tiết” (Lạng Sơn) hoặc “bot, thời tiết Hà Nội”
 • Tin tức: “bot, tin tức” — tin Mặt trận/Lạng Sơn và thời sự nổi bật mới nhất
 • Phiên bản: “bot, phiên bản” — bot tự cập nhật khi có bản mới; muốn kiểm tra ngay: “bot, kiểm tra cập nhật”
+• Trạng thái: “bot, trạng thái” — xem bot + extension còn sống không, lệnh đăng nào đang chờ, cập nhật extension đến đâu
 • Giao cho người khác: “bot, ghi việc giao cho anh Tùng: Kiểm tra máy in, hạn mai 9h”
 • Xem việc: “bot, việc”
 • Bản tin sáng: mỗi sáng thứ 2–6 lúc 07:45 bot tự gửi việc đến hạn hôm nay + việc quá hạn; gọi “bot, việc hôm nay” để xem ngay lúc nào cũng được
@@ -1813,6 +1855,7 @@ async function handleMessage(msg) {
     case 'list': await send(chatId, listText(chatId)); break;
     case 'briefing': { const t = briefingText(chatId, now); await send(chatId, t || 'Hôm nay không có việc nào đến hạn, cũng không có việc quá hạn.'); break; }
     case 'version': await send(chatId, `🤖 Bot Mặt trận Lạng Sơn — phiên bản v${BOT_VERSION}.\nBot tự kiểm tra bản mới mỗi 6 giờ và tự cập nhật khi có; cần kiểm tra ngay thì gọi “bot, kiểm tra cập nhật”.`); break;
+    case 'status': await send(chatId, `📟 Trạng thái hệ thống đăng bài\n🤖 Bot Mặt trận Lạng Sơn v${BOT_VERSION} — đang chạy.\n` + bridgeStatusText(Date.now())); break;
     case 'update': checkForUpdate(chatId).catch((e) => console.error('[Cập nhật] Lỗi:', e.message)); checkExtUpdate(true).catch((e) => console.error('[Cập nhật extension] Lỗi:', e.message)); break;
     case 'fx': { const fx = await getFxRates(); await send(chatId, fx ? (fxText(fx, cmd.code) || 'Loại tiền này không có trong bảng tỷ giá Vietcombank hôm nay.') : 'Chưa lấy được tỷ giá từ Vietcombank lúc này — anh thử lại sau ít phút nhé.'); break; }
     case 'weather': { const w = await getWeather(cmd.place || null); await send(chatId, w || (cmd.place ? `Chưa tìm thấy địa điểm “${cmd.place}” hoặc chưa lấy được dữ liệu thời tiết — anh thử tên khác nhé.` : 'Chưa lấy được dữ liệu thời tiết lúc này — anh thử lại sau ít phút nhé.')); break; }

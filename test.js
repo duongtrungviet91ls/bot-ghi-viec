@@ -233,7 +233,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.9.0');
+  assert.strictEqual(BOT_VERSION, '3.10.0');
   assert.strictEqual(cmpVersion('3.6.0', '3.7.0'), -1);
   assert.strictEqual(cmpVersion('3.7.0', '3.6.0'), 1);
   assert.strictEqual(cmpVersion('3.6.0', '3.6.0'), 0);
@@ -249,6 +249,9 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(validManifest({ version: '3.7.0', files: { 'updater.js': { sha256: H64 } } }), false); // updater không bao giờ tự cập nhật
   assert.strictEqual(validManifest(null), false);
   c = parseCommand('bot, phiên bản', NOW); assert.strictEqual(c.type, 'version');
+  c = parseCommand('bot, trạng thái', NOW); assert.strictEqual(c.type, 'status');
+  c = parseCommand('bot, trang thai extension', NOW); assert.strictEqual(c.type, 'status');
+  assert.notStrictEqual(parseCommand('bot, ghi việc: Kiểm tra trạng thái hồ sơ', NOW).type, 'status'); // chữ "trạng thái" giữa câu việc không thành lệnh
   c = parseCommand('bot, kiểm tra cập nhật', NOW); assert.strictEqual(c.type, 'update');
   c = parseCommand('bot, cập nhật đi', NOW); assert.strictEqual(c.type, 'update');
   assert.notStrictEqual(parseCommand('bot, cập nhật tình hình công việc', NOW).type, 'update'); // câu thường không được hiểu nhầm thành lệnh cập nhật
@@ -316,7 +319,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(isLookupQuestion(foldVN('soạn giúp tôi công văn này')), false);
   // v3.7.1: MỌI lệnh có case xử lý đều phải là lệnh cứng chạy ngay — thiếu là AI chen vào
   // trả lời thay (đã gặp thật: "bot, phiên bản" bị thư ký AI đáp văn hoa, không ra số bản).
-  for (const t of ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'fx', 'weather', 'news']) {
+  for (const t of ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'status', 'fx', 'weather', 'news']) {
     assert.strictEqual(isRuleStrong({ type: t }), true, `lệnh ${t} phải là lệnh cứng`);
   }
   assert.strictEqual(isRuleStrong({ type: 'add', due: new Date() }), true);
