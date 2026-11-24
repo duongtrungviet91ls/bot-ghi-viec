@@ -29,6 +29,12 @@
  * tự tải + kiểm tra mã băm từng file, sao lưu bản cũ, nhờ updater.js thay file và khởi động
  * lại; bản mới lỗi lúc khởi động thì tự quay về bản cũ và nhắn báo. Lệnh: "bot, phiên bản",
  * "bot, kiểm tra cập nhật". v3.5: việc lặp định kỳ + trực ban Chrome. v3.3: bản tin sáng 07:45.
+ * v3.11: CHỐNG TREO + VÁ NÓNG từ log máy thật 24/11 — mọi cuộc gọi Zalo có giới hạn chờ
+ * (callApi 30 giây, vòng nghe tin 35 giây: treo là tự ngắt và nghe lại), đăng nhập lúc khởi
+ * động tự thử lại tối đa ~2 phút (mạng sau mất điện lên chậm hơn lúc Windows đăng nhập —
+ * bản cũ lỗi một lần là chết); GỠ ép thinkingBudget=0 của v3.8 (gemini-3.5-flash-lite trả
+ * 400 INVALID_ARGUMENT, lỗi không nhắc chữ "thinking" nên cơ chế thử lại không kích hoạt —
+ * mọi câu AI đều vấp một cuộc gọi chết); lệnh phiên bản nhận thêm cách nói "kiểm tra phiên bản".
  *
  * Nền tảng: Zalo Bot Platform (Bot Creator). Nhận tin bằng long polling (getUpdates),
  * gửi tin bằng sendMessage — không cần tên miền hay cổng công khai.
@@ -43,7 +49,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.10.0';
+const BOT_VERSION = '3.11.0';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -75,6 +81,12 @@ const CONFIG = {
   defaultPlace: { name: 'Lạng Sơn', lat: 21.85, lon: 106.76 },
   defaultDueTime: [17, 0],      // Không nói giờ → hạn lúc 17:00 ngày hạn
   pollTimeoutSec: 20,
+  // Chống treo (v3.11): trước đây các cuộc gọi Zalo KHÔNG có giới hạn chờ phía máy khách —
+  // mạng chết ngầm sau mất điện là bot treo vô hạn (tiến trình sống mà điếc hẳn).
+  apiTimeoutMs: 30000,       // giới hạn chờ cho mọi cuộc gọi Zalo thường qua callApi
+  pollFetchTimeoutMs: 35000, // giới hạn chờ cho vòng nghe tin: pollTimeoutSec + 15 giây dự phòng — quá là tự ngắt, nghe lại
+  loginRetryMs: Number(process.env.BOT_LOGIN_RETRY_MS || 10000), // nghỉ giữa các lần thử đăng nhập lại lúc khởi động
+  loginRetryMax: 12,         // thử đăng nhập tối đa 12 lần (~2 phút) — mạng sau mất điện thường lên chậm hơn lúc Windows đăng nhập
   reminderTickMs: 60 * 1000,
   dataDir: path.join(__dirname, 'data'),
   // Lớp AI (Gemini) — hiểu câu nói tự nhiên. Tắt khi không có khóa (ai-key.txt / GEMINI_API_KEY).
@@ -359,7 +371,7 @@ function parseCommandInner(rawText, now) {
   let m;
   if (/^(tro giup|help|huong dan)/.test(f) || f === '') return { type: 'help' };
   if (/^(viec hom nay|viec sang|ban tin sang|hom nay co viec gi|viec can lam hom nay)/.test(f)) return { type: 'briefing' };
-  if (/^(phien ban|version)/.test(f)) return { type: 'version' };
+  if (/^(phien ban|version|kiem tra phien ban)/.test(f)) return { type: 'version' }; // "kiểm tra phiên bản" là cách nói tự nhiên — nhận thêm từ v3.11 (trước đây rơi xuống AI)
   if (/^(kiem tra cap nhat|cap nhat(\s+(di|bot|len))?$)/.test(f)) return { type: 'update' };
   if (/^(trang thai|status)/.test(f)) return { type: 'status' };
   // Tra cứu trực tiếp (v3.7): lệnh cứng, không cần khóa AI.
@@ -441,7 +453,16 @@ if (!TOKEN) {
 }
 const api = (method) => `https://bot-api.zaloplatforms.com/bot${TOKEN}/${method}`;
 async function callApi(method, payload) {
-  const res = await fetch(api(method), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}) });
+  // (v3.11) Có giới hạn chờ: quá apiTimeoutMs là ngắt và báo lỗi rõ ràng, không treo vô hạn.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CONFIG.apiTimeoutMs);
+  let res;
+  try {
+    res = await fetch(api(method), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload || {}), signal: ctrl.signal });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error(`${method}: quá ${Math.round(CONFIG.apiTimeoutMs / 1000)} giây không phản hồi (mạng treo?)`);
+    throw e;
+  } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => null);
   if (!res.ok || !data || data.ok === false || (data.error && data.error !== 0)) {
     throw new Error(`${method}: HTTP ${res.status} ${JSON.stringify(data)}`);
@@ -477,10 +498,21 @@ function extractUpdates(data) {
 // Long polling riêng cho getUpdates: Zalo trả error_code 408 "Request timeout" khi hết
 // thời gian chờ mà không có tin mới — đó là trạng thái BÌNH THƯỜNG (không có tin), không phải lỗi.
 async function pollUpdates() {
-  const res = await fetch(api('getUpdates'), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ timeout: CONFIG.pollTimeoutSec }), // getUpdates của Zalo chỉ nhận timeout
-  });
+  // (v3.11) Giới hạn chờ phía máy khách: kết nối chết ngầm (sau mất điện/router khởi động
+  // lại) làm fetch treo vô hạn ở bản cũ — nay quá pollFetchTimeoutMs là ngắt, vòng lặp
+  // ghi log rồi tự nghe lại sau 5 giây.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CONFIG.pollFetchTimeoutMs);
+  let res;
+  try {
+    res = await fetch(api('getUpdates'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal,
+      body: JSON.stringify({ timeout: CONFIG.pollTimeoutSec }), // getUpdates của Zalo chỉ nhận timeout
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error(`getUpdates: quá ${Math.round(CONFIG.pollFetchTimeoutMs / 1000)} giây không phản hồi — ngắt để nghe lại`);
+    throw e;
+  } finally { clearTimeout(timer); }
   const data = await res.json().catch(() => null);
   const errCode = data?.error_code ?? data?.error?.code;
   if (errCode === 408 || data?.description === 'Request timeout') return [];
@@ -707,8 +739,8 @@ Ví dụ:
 - "việc nộp báo cáo xong rồi" (nếu đó là việc số 2 trong danh sách) → {"action":"done","title":null,"assignee":null,"due_text":null,"task_ref":2,"reply":null}
 
 Tin nhắn của người dùng: "${text.replace(/"/g, '“')}"`;
-  // Phân loại là việc nhẹ: tắt suy luận + giới hạn chờ 12 giây/model cho đáp nhanh (v3.8).
-  const raw = await callGemini(prompt, true, { timeoutMs: CONFIG.aiClassifyTimeoutMs, thinkingBudget: 0 });
+  // Phân loại là việc nhẹ: giới hạn chờ 12 giây/model cho đáp nhanh (v3.8; ép tắt suy luận đã gỡ ở v3.11 — xem callGemini).
+  const raw = await callGemini(prompt, true, { timeoutMs: CONFIG.aiClassifyTimeoutMs });
   const parsed = parseAiJson(raw);
   if (raw && !parsed) console.error('[AI] Không đọc được phản hồi:', String(raw).slice(0, 300));
   return parsed;
@@ -719,50 +751,45 @@ let aiModelWorking = null;
 // thử lần lượt các model trong CONFIG.aiModels, model nào chạy được thì ghi nhớ dùng tiếp;
 // mọi lỗi (404 model nghỉ hưu, 429 hết hạn mức của model đó, treo quá giờ, lỗi mạng) đều nhảy sang model kế tiếp.
 // jsonMode=true ép trả JSON (nhiệt độ thấp); false trả văn bản tự do.
-// opts (v3.8): { timeoutMs, thinkingBudget } — thinkingBudget (kể cả 0 = tắt suy luận) GHI ĐÈ mức
-// mặc định của model cho các cuộc gọi phân loại nhẹ; nếu model từ chối mức ép này (lỗi 400 nhắc
-// tới "thinking") thì tự thử lại chính model đó mà không ép, rồi mới chuyển model khác.
+// opts: { timeoutMs } — giới hạn chờ riêng cho cuộc gọi nhẹ (phân loại dùng 12 giây thay vì 30).
+// (v3.11 GỠ cơ chế ép thinkingBudget của v3.8: trên máy thật, gemini-3.5-flash-lite trả 400
+// INVALID_ARGUMENT cho thinkingBudget=0 với thông điệp lỗi chung chung KHÔNG nhắc chữ
+// "thinking", nên cơ chế "thử lại không ép" không bao giờ kích hoạt và mọi câu AI đều vấp
+// một cuộc gọi chết trước khi sang model dự phòng. Giữ mặc định thinking theo từng model
+// như trước v3.8 — bản Lite vốn không tự suy luận.)
 async function callGemini(promptText, jsonMode = true, opts = {}) {
   const timeoutMs = opts.timeoutMs || CONFIG.aiTimeoutMs;
   const order = aiModelWorking ? [...CONFIG.aiModels.filter((m) => m.id === aiModelWorking), ...CONFIG.aiModels.filter((m) => m.id !== aiModelWorking)] : CONFIG.aiModels;
   for (const spec of order) {
     const model = spec.id;
-    const budgets = opts.thinkingBudget != null ? [opts.thinkingBudget, undefined] : [undefined];
-    for (const budget of budgets) {
-      const tb = budget !== undefined ? budget : spec.thinkingBudget;
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-      try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-          method: 'POST', signal: ctrl.signal,
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': AI_KEY },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: promptText }] }],
-            generationConfig: {
-              ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
-              temperature: jsonMode ? 0.2 : 0.4,
-              ...(tb != null ? { thinkingConfig: { thinkingBudget: tb } } : {}),
-            },
-          }),
-        });
-        const data = await res.json().catch(() => null);
-        if (!res.ok) {
-          if (budget !== undefined && res.status === 400 && /thinking/i.test(JSON.stringify(data || ''))) {
-            console.error(`[AI] Model ${model} không nhận thinkingBudget=${budget} — thử lại không ép thinking.`);
-            continue; // thử lại chính model này ở vòng budgets kế tiếp (không ép)
-          }
-          const why = res.status === 404 ? 'không còn hoạt động (404)' : `trả lỗi ${res.status}: ${JSON.stringify(data).slice(0, 200)}`;
-          console.error(`[AI] Model ${model} ${why} — thử model khác.`);
-          break;
-        }
-        if (!aiModelWorking) { aiModelWorking = model; console.log(`[AI] Đang dùng model: ${model}`); }
-        return data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-      } catch (e) {
-        const why = e && e.name === 'AbortError' ? `quá ${Math.round(timeoutMs / 1000)} giây không trả lời` : (e && e.message) || String(e);
-        console.error(`[AI] Model ${model} lỗi: ${why} — thử model khác.`);
-        break;
-      } finally { clearTimeout(timer); }
-    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST', signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': AI_KEY },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: promptText }] }],
+          generationConfig: {
+            ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
+            temperature: jsonMode ? 0.2 : 0.4,
+            ...(spec.thinkingBudget ? { thinkingConfig: { thinkingBudget: spec.thinkingBudget } } : {}),
+          },
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const why = res.status === 404 ? 'không còn hoạt động (404)' : `trả lỗi ${res.status}: ${JSON.stringify(data).slice(0, 200)}`;
+        console.error(`[AI] Model ${model} ${why} — thử model khác.`);
+        continue;
+      }
+      if (!aiModelWorking) { aiModelWorking = model; console.log(`[AI] Đang dùng model: ${model}`); }
+      return data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+    } catch (e) {
+      const why = e && e.name === 'AbortError' ? `quá ${Math.round(timeoutMs / 1000)} giây không trả lời` : (e && e.message) || String(e);
+      console.error(`[AI] Model ${model} lỗi: ${why} — thử model khác.`);
+      continue;
+    } finally { clearTimeout(timer); }
   }
   console.error('[AI] Tất cả model đều không dùng được — bot tạm quay về lệnh cứng.');
   return null;
@@ -1950,7 +1977,18 @@ async function reminderTick() {
 async function main() {
   writeUpdateState('booting'); // Trình cập nhật (updater.js) theo dõi file này để biết bot mới đã lên hay chưa.
   if (!TOKEN || !TOKEN.includes(':')) { console.error('Thiếu BOT_TOKEN (định dạng <bot_id>:<secret>). Chạy: BOT_TOKEN=... node bot.js'); process.exit(1); }
-  const me = await callApi('getMe');
+  // Đăng nhập (v3.11): tự thử lại tối đa ~2 phút. Sau mất điện, Windows đăng nhập xong
+  // thường sớm hơn mạng/router vài chục giây — bản cũ gọi đúng một lần, lỗi là bot chết
+  // luôn dù file chạy ẩn đã lên. Thử đủ số lần vẫn lỗi mới chịu thua (ném lỗi như cũ).
+  let me = null;
+  for (let attempt = 1; ; attempt++) {
+    try { me = await callApi('getMe'); break; }
+    catch (e) {
+      if (attempt >= CONFIG.loginRetryMax) throw e;
+      console.error(`[Khởi động] Đăng nhập Zalo lần ${attempt} lỗi: ${e.message} — thử lại sau ${Math.round(CONFIG.loginRetryMs / 1000)} giây…`);
+      await sleepMs(CONFIG.loginRetryMs);
+    }
+  }
   console.log('Bot đã đăng nhập:', JSON.stringify(me));
   console.log('Phiên bản bot: v' + BOT_VERSION);
   console.log(AI_KEY ? 'AI Gemini: BẬT — bot hiểu được câu nói tự nhiên.' : 'AI Gemini: TẮT (chưa có ai-key.txt) — bot chỉ hiểu lệnh theo mẫu cứng.');

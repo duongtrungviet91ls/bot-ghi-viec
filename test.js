@@ -3,7 +3,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, enqueueChatWork, store } = require('./bot.js');
+const { foldVN, parseDeadline, parseCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, enqueueChatWork, store, CONFIG } = require('./bot.js');
 
 // "Bây giờ" cố định: Thứ 2, 16/11/2026, 09:00
 const NOW = new Date(2026, 10, 16, 9, 0);
@@ -233,7 +233,12 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.10.0');
+  assert.strictEqual(BOT_VERSION, '3.11.0');
+  // Chống treo (v3.11): các giới hạn chờ phải tồn tại và vòng nghe tin phải chờ lâu hơn
+  // thời gian long-poll phía Zalo (không thì ngắt oan tin đang về).
+  assert.ok(CONFIG.apiTimeoutMs >= 10000 && CONFIG.apiTimeoutMs <= 60000);
+  assert.ok(CONFIG.pollFetchTimeoutMs > CONFIG.pollTimeoutSec * 1000);
+  assert.ok(CONFIG.loginRetryMax >= 3 && CONFIG.loginRetryMs > 0);
   assert.strictEqual(cmpVersion('3.6.0', '3.7.0'), -1);
   assert.strictEqual(cmpVersion('3.7.0', '3.6.0'), 1);
   assert.strictEqual(cmpVersion('3.6.0', '3.6.0'), 0);
@@ -249,6 +254,8 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(validManifest({ version: '3.7.0', files: { 'updater.js': { sha256: H64 } } }), false); // updater không bao giờ tự cập nhật
   assert.strictEqual(validManifest(null), false);
   c = parseCommand('bot, phiên bản', NOW); assert.strictEqual(c.type, 'version');
+  c = parseCommand('kiểm tra phiên bản', NOW); assert.strictEqual(c.type, 'version'); // cách nói tự nhiên (v3.11) — trước đây rơi xuống AI rồi chết vì lỗi 400
+  c = parseCommand('bot, kiểm tra phiên bản', NOW); assert.strictEqual(c.type, 'version');
   c = parseCommand('bot, trạng thái', NOW); assert.strictEqual(c.type, 'status');
   c = parseCommand('bot, trang thai extension', NOW); assert.strictEqual(c.type, 'status');
   assert.notStrictEqual(parseCommand('bot, ghi việc: Kiểm tra trạng thái hồ sơ', NOW).type, 'status'); // chữ "trạng thái" giữa câu việc không thành lệnh
@@ -347,10 +354,12 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   {
     let geminiCalls = 0;
     let zaloCalls = 0;
+    const geminiBodies = [];
     const realFetch = globalThis.fetch;
-    globalThis.fetch = async (url) => {
+    globalThis.fetch = async (url, opts) => {
       if (String(url).includes('bot-api.zaloplatforms.com')) { zaloCalls++; return { ok: true, status: 200, json: async () => ({ ok: true, result: {} }) }; }
       geminiCalls++;
+      geminiBodies.push(String((opts && opts.body) || ''));
       const text = geminiCalls === 1
         ? JSON.stringify({ action: 'secretary', title: null, assignee: null, due_text: null, task_ref: null, reply: null, search: false, query: null })
         : 'Đoạn mở đầu mẫu cho báo cáo.';
@@ -363,6 +372,8 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
       assert.strictEqual(secOk, true);
       assert.strictEqual(geminiCalls, 2); // hiểu ý + soạn trả lời, KHÔNG còn cuộc gọi quyết định tìm web riêng
       assert.ok(zaloCalls >= 1);
+      // v3.11: KHÔNG được gửi thinkingBudget:0 — gemini-3.5-flash-lite trả 400 vì nó (log máy thật 24/11).
+      assert.ok(geminiBodies.every((b) => !b.includes('"thinkingBudget":0')), 'không còn ép thinkingBudget 0');
     } finally {
       globalThis.fetch = realFetch;
       delete store.history['chat-sec'];
