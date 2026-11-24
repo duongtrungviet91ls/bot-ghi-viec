@@ -1,0 +1,2 @@
+URL=https://mttqlangson.pages.dev
+TOKEN=dan-token-do-quan-tri-nen-tang-cap-vao-day

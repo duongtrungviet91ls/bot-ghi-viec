@@ -34,7 +34,16 @@
  * động tự thử lại tối đa ~2 phút (mạng sau mất điện lên chậm hơn lúc Windows đăng nhập —
  * bản cũ lỗi một lần là chết); GỠ ép thinkingBudget=0 của v3.8 (gemini-3.5-flash-lite trả
  * 400 INVALID_ARGUMENT, lỗi không nhắc chữ "thinking" nên cơ chế thử lại không kích hoạt —
- * mọi câu AI đều vấp một cuộc gọi chết); lệnh phiên bản nhận thêm cách nói "kiểm tra phiên bản".
+ * một cuộc gọi chết); lệnh phiên bản nhận thêm cách nói "kiểm tra phiên bản".
+ * v3.12: SỔ HẠN CÔNG VIỆC — hạn chót LƯU TRÊN NỀN TẢNG Mặt trận số (API /api/bot/so-han,
+ * khóa trong file so-han-config.txt cạnh bot.js, KHÔNG nằm trong kho này). Lệnh mới:
+ * "bot, hạn: <việc> — <thời hạn>" (bóc hạn xác định theo giờ VN, không bóc được mới nhờ
+ * AI rồi HỎI LẠI xác nhận), "bot, sổ hạn" / "bot, hạn", "xong <từ khóa>", "dời hạn <từ
+ * khóa> sang <ngày>". Động cơ nhắc bám vòng reminderTick: nhắc sáng theo mốc T-3/T-1/
+ * hết hạn hôm nay/quá hạn mỗi ngày (hợp nhất với bản tin 07:45 — bản tin gửi kèm mục
+ * Sổ hạn và chính là lượt gửi ghi mốc sáng ngày làm việc) + nhắc trước hạn ~3 giờ;
+ * chống nhắc trùng bằng khóa mốc phía máy chủ (cac_moc_da_nhac) nên bot khởi động lại
+ * cũng không nhắc lại.
  *
  * Nền tảng: Zalo Bot Platform (Bot Creator). Nhận tin bằng long polling (getUpdates),
  * gửi tin bằng sendMessage — không cần tên miền hay cổng công khai.
@@ -49,7 +58,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const BOT_VERSION = '3.11.0';
+const BOT_VERSION = '3.12.0';
 
 // ============================== CẤU HÌNH ==============================
 const CONFIG = {
@@ -360,7 +369,7 @@ function parseAddCommand(rawText, now) {
 // phải có mặt ở đây — thiếu là AI chen vào trả lời thay (đã gặp thật 2026-11-23: lệnh
 // "phiên bản" và "kiểm tra cập nhật" bị thư ký AI trả lời văn hoa thay vì chạy lệnh, v3.7.1 vá).
 function isRuleStrong(cmd) {
-  return ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'status', 'fx', 'weather', 'news'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due);
+  return ['help', 'list', 'briefing', 'done', 'delete', 'redue', 'remind', 'version', 'update', 'status', 'fx', 'weather', 'news', 'sohan_list', 'sohan_done', 'sohan_move', 'sohan_move_bad'].includes(cmd.type) || (cmd.type === 'add' && !!cmd.due) || (cmd.type === 'sohan_add' && !!cmd.dueEpoch);
 }
 
 function parseCommandInner(rawText, now) {
@@ -383,6 +392,24 @@ function parseCommandInner(rawText, now) {
   if ((m = f.match(/^sua\s+han\s+(viec\s*)?(\d+)\s+(.+)/))) {
     const p = parseDeadline(foldVN(m[3]), now);
     return p ? { type: 'redue', n: parseInt(m[2], 10), due: p.due } : { type: 'unknown' };
+  }
+  // ===== SỔ HẠN (v3.12) — lệnh cứng, xử lý riêng ở handleSohanCommand (không qua AI) =====
+  if (f === 'so han' || f === 'han') return { type: 'sohan_list' };
+  if ((m = f.match(/^doi han\s+(.+?)\s+sang\s+(.+)$/))) {
+    const kwStart = f.indexOf(m[1]);
+    const keyword = text.slice(kwStart, kwStart + m[1].length).trim();
+    const p = parseSohanDeadline(m[2], now);
+    return p ? { type: 'sohan_move', keyword, dueEpoch: p.epochSec } : { type: 'sohan_move_bad', keyword };
+  }
+  if ((m = f.match(/^(?:da\s+)?xong\s+(\D.+)$/))) {
+    const kwStart = f.indexOf(m[1]);
+    return { type: 'sohan_done', keyword: text.slice(kwStart, kwStart + m[1].length).trim() };
+  }
+  {
+    let sohanBody = null;
+    const pm = f.match(/^(them han|ghi han|them so han)\b\s*[:：]?\s*/) || f.match(/^han\s*[:：]\s*/);
+    if (pm) sohanBody = text.slice(pm[0].length);
+    if (sohanBody !== null && sohanBody.trim()) return parseSohanAdd(sohanBody, now);
   }
   if (/^(danh sach|liet ke|xem viec|viec nao|viec)$/.test(f) || /^viec\s+(sắp|sắp den|sắp tới)/.test(f) || /^viec/.test(f) && /den han|sap/.test(f)) return { type: 'list' };
   // Nhắc nhanh kiểu tự nhiên: "nhắc tao, 2 phút nữa đi ngủ", "nhắc mình đi ngủ sau 5 phút"
@@ -416,7 +443,7 @@ function parseCommand(rawText, now) {
   // Dự phòng cho tin @nhắc tên bot dài trong nhóm (vd "@Bot Mặt trận Lạng Sơn ghi việc: …"):
   // tìm vị trí bắt đầu của từ khóa lệnh trong câu và phân tích lại từ đó.
   const f = foldVN(rawText);
-  const m = f.match(/(ghi viec|them viec|giao viec|nhac viec|nhac\s+(tao|toi|minh)|tro giup|danh sach|liet ke|xem viec|viec hom nay|ban tin sang|sua han|xong\s+\d|xoa\s+\d)/);
+  const m = f.match(/(ghi viec|them viec|giao viec|nhac viec|nhac\s+(tao|toi|minh)|tro giup|danh sach|liet ke|xem viec|viec hom nay|ban tin sang|sua han|xong\s+\d|xoa\s+\d|so han|them han|ghi han|doi han|han\s*[:：]|xong\s+\D)/);
   if (m && m.index > 0) return parseCommandInner(rawText.slice(m.index), now);
   return first;
 }
@@ -534,25 +561,479 @@ function listText(chatId) {
   }).join('\n');
 }
 
+// ============================== SỔ HẠN CÔNG VIỆC (v3.12) ==============================
+// Hạn chót cấp cơ quan lưu TRÊN NỀN TẢNG Mặt trận số (không lưu ở máy bot): bot chỉ là
+// một khách hàng của API /api/bot/so-han. Cấu hình ở file so-han-config.txt CẠNH bot.js
+// (2 dòng URL=… và TOKEN=…, KHÔNG bao giờ đưa vào kho Git — xem so-han-config.example.txt).
+// Mọi mốc thời gian của Sổ hạn tính theo GIỜ VIỆT NAM (UTC+7) một cách xác định từ epoch,
+// không phụ thuộc múi giờ của máy chạy bot.
+// Cơ chế chống nhắc trùng: máy chủ ghi khóa mốc vào cac_moc_da_nhac của từng hạn
+// (POST …/reminded); bot chỉ gửi mốc nào chưa có khóa và chỉ ghi khóa SAU khi gửi thành
+// công — bot khởi động lại, gửi lại nhịp sau cũng không nhắc trùng.
+const SOHAN_CONFIG_FILE = path.join(__dirname, 'so-han-config.txt');
+let sohanConfigOverride = null; // chỉ dành cho kiểm thử (setSohanTestDeps)
+let sohanFetchImpl = null;       // chỉ dành cho kiểm thử (setSohanTestDeps)
+function setSohanTestDeps(deps) {
+  if (!deps) { sohanConfigOverride = null; sohanFetchImpl = null; return; }
+  if ('config' in deps) sohanConfigOverride = deps.config;
+  if ('fetch' in deps) sohanFetchImpl = deps.fetch;
+}
+function loadSohanConfig() {
+  if (sohanConfigOverride) return sohanConfigOverride;
+  try {
+    const cfg = {};
+    for (const line of fs.readFileSync(SOHAN_CONFIG_FILE, 'utf8').split(/\r?\n/)) {
+      const i = line.indexOf('=');
+      if (i < 1) continue;
+      cfg[line.slice(0, i).trim().toUpperCase()] = line.slice(i + 1).trim();
+    }
+    if (cfg.URL && cfg.TOKEN) return { url: cfg.URL.replace(/\/+$/, ''), token: cfg.TOKEN };
+  } catch { /* chưa có file cấu hình */ }
+  return null;
+}
+function sohanErr(code, msg) { const e = new Error(msg); e.code = code; return e; }
+async function sohanRequest(method, p, body) {
+  const cfg = loadSohanConfig();
+  if (!cfg) throw sohanErr('NOT_CONFIGURED', 'chưa có file so-han-config.txt');
+  const doFetch = sohanFetchImpl || globalThis.fetch;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  let res;
+  try {
+    res = await doFetch(cfg.url + p, {
+      method, signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', 'X-Bot-Token': cfg.token },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (e) {
+    throw sohanErr('NETWORK', e && e.name === 'AbortError' ? 'quá 15 giây không phản hồi' : ('không kết nối được: ' + ((e && e.message) || e)));
+  } finally { clearTimeout(timer); }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw sohanErr('HTTP_' + res.status, (data && data.error) || ('HTTP ' + res.status));
+  return data;
+}
+const sohanGetOpen = async () => sohanRequest('GET', '/api/bot/so-han/open');
+const sohanCreate = async (payload) => sohanRequest('POST', '/api/bot/so-han', payload);
+const sohanDone = async (id) => sohanRequest('POST', `/api/bot/so-han/${encodeURIComponent(id)}/done`, {});
+const sohanMove = async (id, hanLuc) => sohanRequest('POST', `/api/bot/so-han/${encodeURIComponent(id)}/move`, { han_luc: hanLuc });
+const sohanReminded = async (id, key) => sohanRequest('POST', `/api/bot/so-han/${encodeURIComponent(id)}/reminded`, { key });
+
+// ---- Giờ Việt Nam từ epoch (xác định, không lệ thuộc múi giờ máy) ----
+const VN_OFFSET_MS = 7 * 3600 * 1000;
+function vnParts(ms) {
+  const d = new Date(Number(ms) + VN_OFFSET_MS);
+  return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes(), wd: d.getUTCDay() };
+}
+function vnEpochSec(y, mo, d, h, mi) { return Math.floor((Date.UTC(y, mo - 1, d, h, mi, 0) - VN_OFFSET_MS) / 1000); }
+function vnDateStr(ms) { const p = vnParts(ms); return `${p.y}-${pad(p.mo)}-${pad(p.d)}`; }
+// Số ngày lịch VN từ thời điểm a tới thời điểm b (dương = b ở ngày sau a).
+function vnDayDiff(aMs, bMs) {
+  const a = vnParts(aMs), b = vnParts(bMs);
+  return Math.round((Date.UTC(b.y, b.mo - 1, b.d) - Date.UTC(a.y, a.mo - 1, a.d)) / 86400000);
+}
+function fmtSohanDue(epochSec) {
+  const p = vnParts(Number(epochSec) * 1000);
+  const days = ['Chủ nhật', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'];
+  return `${days[p.wd]}, ${pad(p.d)}/${pad(p.mo)}/${p.y} lúc ${pad(p.h)}:${pad(p.mi)}`;
+}
+function sohanRelLabel(item, nowMs) {
+  const diff = vnDayDiff(nowMs, Number(item.han_luc) * 1000);
+  if (diff > 0) return `còn ${diff} ngày`;
+  if (diff < 0) return `QUÁ HẠN ${-diff} ngày`;
+  return Number(item.han_luc) * 1000 >= nowMs ? 'hôm nay' : 'QUÁ HẠN hôm nay';
+}
+
+// ---- Bộ phân tích thời hạn XÁC ĐỊNH cho Sổ hạn (đầu vào: chuỗi ĐÃ GẤP dấu) ----
+// Khác parseDeadline của việc nội bộ: mặc định 23:59 (không phải 17:00), ngày dd/mm đã
+// qua theo NGÀY VN thì sang năm sau (đúng hôm nay thì giữ năm nay), giờ nhận ở mọi vị
+// trí phổ biến quanh ngày ("23:59 ngày 24/11", "24/11 17:00", "17h30 24/11").
+// Trả { epochSec, start, end } — [start,end) là đoạn chữ diễn tả hạn trong chuỗi đã gấp.
+function parseSohanDeadline(folded, now) {
+  const nowMs = now instanceof Date ? +now : Number(now || Date.now());
+  const f = String(folded || '');
+  let time = null, tm = null;
+  const tmTry = f.match(/(\d{1,2}):(\d{2})/) || f.match(/(\d{1,2})\s*h\s*(\d{2})\b/) || f.match(/(\d{1,2})\s*gio\s*(\d{2})\b/) || f.match(/(\d{1,2})\s*h\b/) || f.match(/(\d{1,2})\s*gio\b/);
+  if (tmTry) {
+    const hh = parseInt(tmTry[1], 10), mm = parseInt(tmTry[2] || '0', 10);
+    if (hh <= 23 && mm <= 59) { time = [hh, mm]; tm = tmTry; }
+  }
+  let date = null, dm = null;
+  if ((dm = f.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/))) {
+    const d = parseInt(dm[1], 10), mo = parseInt(dm[2], 10);
+    if (d < 1 || d > 31 || mo < 1 || mo > 12) return null;
+    const today = vnParts(nowMs);
+    let y = dm[3] ? parseInt(dm[3], 10) : today.y;
+    if (!dm[3] && (mo < today.mo || (mo === today.mo && d < today.d))) y = today.y + 1; // ngày đã qua → sang năm; đúng hôm nay thì giữ
+    const chk = new Date(Date.UTC(y, mo - 1, d));
+    if (chk.getUTCDate() !== d || chk.getUTCMonth() !== mo - 1) return null; // ngày không tồn tại (vd 31/2)
+    date = { y, mo, d };
+  } else if ((dm = f.match(/ngay\s+mai|\bmai\b/))) {
+    const t = vnParts(nowMs + 86400000); date = { y: t.y, mo: t.mo, d: t.d };
+  } else if ((dm = f.match(/hom\s+nay/))) {
+    const t = vnParts(nowMs); date = { y: t.y, mo: t.mo, d: t.d };
+  } else {
+    const wdMap = { 'thu 2': 1, 'thu hai': 1, 'thu 3': 2, 'thu ba': 2, 'thu 4': 3, 'thu tu': 3, 'thu 5': 4, 'thu nam': 4, 'thu 6': 5, 'thu sau': 5, 'thu 7': 6, 'thu bay': 6, 'chu nhat': 0 };
+    let best = null;
+    // Khóa dài hơn thắng khi cùng vị trí: "thu bay" chứa "thu ba" — không sắp xếp thì
+    // "thứ bảy" bị hiểu nhầm thành thứ ba (đã bắt được ở kiểm thử v3.12).
+    for (const k of Object.keys(wdMap).sort((a, b) => b.length - a.length)) {
+      const idx = f.indexOf(k);
+      if (idx !== -1 && (!best || idx < best.index)) best = { index: idx, len: k.length, wd: wdMap[k] };
+    }
+    if (best) {
+      dm = { index: best.index, 0: f.slice(best.index, best.index + best.len) };
+      const add = (best.wd - vnParts(nowMs).wd + 7) % 7; // thứ đó sắp tới; trùng hôm nay → hôm nay
+      const t = vnParts(nowMs + add * 86400000); date = { y: t.y, mo: t.mo, d: t.d };
+    }
+  }
+  if (!date) return null;
+  const [hh, mm] = time || [23, 59]; // không kèm giờ → 23:59 giờ VN ngày đó
+  let start = dm.index, end = dm.index + dm[0].length;
+  if (tm) { start = Math.min(start, tm.index); end = Math.max(end, tm.index + tm[0].length); }
+  return { epochSec: vnEpochSec(date.y, date.mo, date.d, hh, mm), start, end };
+}
+function sohanCap(t) { t = String(t || '').trim(); return t ? t[0].toUpperCase() + t.slice(1) : ''; }
+// Tách câu ghi hạn thành { type:'sohan_add', title, dueEpoch|null, rawBody }.
+// Ưu tiên dấu phân cách "—"/"–"/" - " (phần sau là thời hạn); không có thì bóc đoạn hạn
+// ngay trong câu và phần còn lại là tên việc.
+function parseSohanAdd(bodyOrig, now) {
+  const body = String(bodyOrig || '').trim();
+  let sepIdx = -1, sepLen = 0;
+  for (const sep of [' — ', ' – ', ' - ']) { const i = body.lastIndexOf(sep); if (i > sepIdx) { sepIdx = i; sepLen = sep.length; } }
+  if (sepIdx > 0) {
+    const title = body.slice(0, sepIdx).trim();
+    const p = parseSohanDeadline(foldVN(body.slice(sepIdx + sepLen)), now);
+    if (p) return { type: 'sohan_add', title: sohanCap(title), dueEpoch: p.epochSec, rawBody: body };
+    return { type: 'sohan_add', title: sohanCap(title) || sohanCap(body), dueEpoch: null, rawBody: body };
+  }
+  const p = parseSohanDeadline(foldVN(body), now);
+  if (p) {
+    let title = (body.slice(0, p.start) + ' ' + body.slice(p.end)).replace(/\s{2,}/g, ' ').trim().replace(/[\s,;:—–-]+$/, '').trim();
+    const wm = foldVN(title).match(/\b(den han|han|truoc)\s*$/);
+    if (wm) title = title.slice(0, title.length - wm[0].length).trim().replace(/[\s,;:]+$/, '').trim();
+    return { type: 'sohan_add', title: sohanCap(title), dueEpoch: p.epochSec, rawBody: body };
+  }
+  return { type: 'sohan_add', title: sohanCap(body), dueEpoch: null, rawBody: body };
+}
+
+// ---- Khớp từ khóa với tiêu đề hạn đang mở (không phân biệt hoa thường/dấu) ----
+function sohanNormKw(s) { return foldVN(s || '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s{2,}/g, ' ').trim(); }
+function matchSohanItems(items, keyword) {
+  const q = sohanNormKw(keyword);
+  if (!q) return [];
+  const qToks = q.split(' ');
+  return (items || []).filter((it) => {
+    const t = sohanNormKw(it.tieu_de);
+    if (!t) return false;
+    if (t.includes(q)) return true;
+    const tToks = t.split(' ');
+    return qToks.every((tok) => tToks.includes(tok) || t.includes(tok));
+  });
+}
+
+// ---- Chọn mốc nhắc (hàm THUẦN — có kiểm thử) ----
+// morning=true: mốc sáng theo ngày lịch VN — T3 (còn đúng 3 ngày), T1 (còn 1 ngày),
+// DUE (hết hạn hôm nay), OD (đã quá hạn, nhắc MỖI NGÀY nên khóa chứa ngày gửi).
+// SOON: còn mở, chưa quá hạn và chỉ còn ≤3 giờ — kiểm ở mọi nhịp.
+// Chỉ trả mốc mà khóa của nó CHƯA có trong cac_moc_da_nhac của hạn đó.
+function sohanMilestones(item, nowMs, opts = {}) {
+  const out = [];
+  const rec = new Set(item.cac_moc_da_nhac || []);
+  const dueMs = Number(item.han_luc) * 1000;
+  const D = vnDateStr(dueMs);
+  const diff = vnDayDiff(nowMs, dueMs);
+  if (opts.morning) {
+    let kind = null, key = null;
+    if (diff === 3) { kind = 'T3'; key = `T3@${D}`; }
+    else if (diff === 1) { kind = 'T1'; key = `T1@${D}`; }
+    else if (diff === 0) { kind = 'DUE'; key = `DUE@${D}`; }
+    else if (diff < 0) { kind = 'OD'; key = `OD@${D}:${vnDateStr(nowMs)}`; }
+    if (kind && !rec.has(key)) out.push({ kind, key });
+  }
+  if (opts.soon !== false) {
+    const nowSec = Math.floor(Number(nowMs) / 1000);
+    if (Number(item.han_luc) >= nowSec && Number(item.han_luc) - nowSec <= 3 * 3600) {
+      const key = `SOON@${D}`;
+      if (!rec.has(key)) out.push({ kind: 'SOON', key });
+    }
+  }
+  return out;
+}
+function chooseSohanReminders(items, nowMs, morning) {
+  return (items || []).flatMap((it) => sohanMilestones(it, nowMs, { morning: !!morning, soon: true }).map((ms) => ({ item: it, kind: ms.kind, key: ms.key })));
+}
+
+// ---- Đệm danh sách hạn mở (cho mục Sổ hạn trong bản tin sáng + nhịp nhắc) ----
+let sohanCache = { at: 0, items: null };
+function setSohanCache(items) { sohanCache = { at: Date.now(), items: items || [] }; }
+async function refreshSohanCache() {
+  try {
+    const data = await sohanGetOpen();
+    setSohanCache(Array.isArray(data && data.items) ? data.items : []);
+    return sohanCache.items;
+  } catch (e) {
+    console.error('[Sổ hạn] Không lấy được danh sách hạn mở:', e.message); // lỗi nền: chỉ ghi log, không làm phiền nhóm
+    return null;
+  }
+}
+function sohanLine(it, nowMs) {
+  return `• ${it.tieu_de} — ⏰ ${fmtSohanDue(it.han_luc)} (${sohanRelLabel(it, nowMs)})${it.nguoi_lien_quan ? ` — 👤 ${it.nguoi_lien_quan}` : ''}`;
+}
+// Mục xem trong bản tin 07:45 — CHỈ ĐỂ XEM, không ghi mốc (ghi mốc do lượt nhắc sáng).
+function sohanBriefingSection(now) {
+  if (!sohanCache.items) return null;
+  const nowMs = +now;
+  const items = sohanCache.items;
+  const overdue = items.filter((it) => Number(it.han_luc) * 1000 < nowMs);
+  const today = items.filter((it) => Number(it.han_luc) * 1000 >= nowMs && vnDayDiff(nowMs, Number(it.han_luc) * 1000) === 0);
+  const soon = items.filter((it) => { const d = vnDayDiff(nowMs, Number(it.han_luc) * 1000); return Number(it.han_luc) * 1000 >= nowMs && d >= 1 && d <= 3; });
+  if (!overdue.length && !today.length && !soon.length) return '⏰ Hạn hôm nay / sắp tới:\nKhông có hạn nào sắp tới.';
+  const parts = ['⏰ Hạn hôm nay / sắp tới:'];
+  if (overdue.length) parts.push(`⛔ Đã quá hạn:\n${overdue.map((it) => sohanLine(it, nowMs)).join('\n')}`);
+  if (today.length) parts.push(`📌 Hết hạn hôm nay:\n${today.map((it) => sohanLine(it, nowMs)).join('\n')}`);
+  if (soon.length) parts.push(`🔜 Trong 3 ngày tới:\n${soon.map((it) => sohanLine(it, nowMs)).join('\n')}`);
+  return parts.join('\n');
+}
+function sohanListText(items, nowMs) {
+  if (!items || !items.length) return '📒 Sổ hạn đang trống — chưa có hạn công việc nào đang mở.\nGhi hạn mới: “bot, hạn: <tên việc> — <thời hạn>”, ví dụ “bot, hạn: Nộp báo cáo — 24/11 17:00”.';
+  const lines = items.map((it, i) => `${i + 1}. ${fmtSohanDue(it.han_luc)} — ${it.tieu_de} (${sohanRelLabel(it, nowMs)})${it.nguoi_lien_quan ? `\n   👤 ${it.nguoi_lien_quan}` : ''}${it.ghi_chu ? `\n   📝 ${it.ghi_chu}` : ''}`);
+  return `📒 SỔ HẠN — ${items.length} hạn đang mở (gần nhất trước):\n${lines.join('\n')}`;
+}
+
+// ---- Chờ xác nhận / chờ chọn (tối giản, theo chat+người gửi, hết hạn sau 5 phút) ----
+// Dùng cho: (1) hạn do AI bóc — chỉ lưu sau khi người dùng trả lời "đồng ý";
+// (2) đóng việc/dời hạn khớp nhiều kết quả — người dùng trả lời số thứ tự.
+const sohanPending = new Map();
+const sohanPKey = (chatId, userId) => `${chatId}|${userId}`;
+function setSohanPending(key, v) { v.expires = Date.now() + 5 * 60 * 1000; sohanPending.set(key, v); }
+function getSohanPending(key) {
+  const v = sohanPending.get(key);
+  if (!v) return null;
+  if (Date.now() > v.expires) { sohanPending.delete(key); return null; }
+  return v;
+}
+async function sohanApiFail(chatId, e) {
+  if (e && e.code === 'NOT_CONFIGURED') {
+    await send(chatId, '⚠️ Tính năng Sổ hạn CHƯA ĐƯỢC CẤU HÌNH trên máy chạy bot (thiếu file so-han-config.txt cạnh bot.js) nên em chưa kết nối được với nền tảng Mặt trận số — hạn này chưa được ghi ở đâu cả. Anh/chị báo quản trị đặt file cấu hình (URL + token do nền tảng cấp) rồi thử lại nhé.');
+  } else {
+    await send(chatId, `⚠️ Em KHÔNG KẾT NỐI ĐƯỢC với nền tảng Mặt trận số để xử lý Sổ hạn (${(e && e.message) || e}) — thao tác chưa được thực hiện. Anh/chị thử lại sau ít phút nhé.`);
+  }
+}
+// Trả true nếu tin nhắn là câu trả lời cho một chờ Sổ hạn đang mở.
+async function handleSohanPending(text, chatId, fromName, userId) {
+  const key = sohanPKey(chatId, userId);
+  const pend = getSohanPending(key);
+  if (!pend) return false;
+  const f = foldVN(text).trim();
+  const isCancel = /^(huy|huy bo|khong|thoi|bo qua)$/.test(f);
+  try {
+    if (pend.kind === 'confirm_add') {
+      if (/^(dong y|ok|oke|xac nhan|dong y luu|luu di)$/.test(f)) {
+        sohanPending.delete(key);
+        const item = await sohanCreate({ tieu_de: pend.title, han_luc: pend.han_luc });
+        sohanCache = { at: 0, items: null };
+        await send(chatId, `✅ Đã ghi vào Sổ hạn: ${(item && item.tieu_de) || pend.title}\n⏰ Hạn: ${fmtSohanDue((item && item.han_luc) || pend.han_luc)}`);
+        return true;
+      }
+      if (isCancel) { sohanPending.delete(key); await send(chatId, 'Đã hủy — hạn này không được ghi vào Sổ hạn.'); return true; }
+      return false;
+    }
+    if (pend.kind === 'choose_done' || pend.kind === 'choose_move') {
+      if (isCancel) { sohanPending.delete(key); await send(chatId, 'Đã hủy thao tác Sổ hạn.'); return true; }
+      const nm = f.match(/^(\d+)$/);
+      if (!nm) return false;
+      const pick = pend.items[parseInt(nm[1], 10) - 1];
+      if (!pick) { await send(chatId, `Số ${nm[1]} không có trong danh sách vừa liệt kê — anh/chị chọn lại số từ 1 đến ${pend.items.length}, hoặc trả lời “hủy”.`); return true; }
+      sohanPending.delete(key);
+      if (pend.kind === 'choose_done') {
+        await sohanDone(pick.id);
+        await send(chatId, `🎉 Đã đóng việc trong Sổ hạn: ${pick.tieu_de} (hạn ${fmtSohanDue(pick.han_luc)}).`);
+      } else {
+        const item = await sohanMove(pick.id, pend.newEpoch);
+        await send(chatId, `✅ Đã dời hạn “${pick.tieu_de}”: ${fmtSohanDue(pick.han_luc)} → ${fmtSohanDue((item && item.han_luc) || pend.newEpoch)}.`);
+      }
+      sohanCache = { at: 0, items: null };
+      return true;
+    }
+  } catch (e) { await sohanApiFail(chatId, e); return true; }
+  return false;
+}
+// Nhờ Gemini bóc câu ghi hạn mà bộ xác định bó tay → { tieu_de, han_luc(epoch giây) } hoặc null.
+// Kết quả CHỈ dùng để hỏi lại xác nhận, không lưu thẳng.
+async function aiParseSohan(text, now) {
+  try {
+    const prompt = `Bạn là lớp trích xuất thời hạn cho một sổ hạn công việc ở Việt Nam. Bây giờ là ${fmtSohanDue(Math.floor(+now / 1000))} (giờ Việt Nam).
+Đọc câu của người dùng và trả về DUY NHẤT một JSON: {"tieu_de": string|null, "han_luc": string|null}
+- tieu_de: tên việc ngắn gọn, bỏ phần diễn tả thời hạn.
+- han_luc: thời hạn dạng ISO 8601 kèm múi giờ +07:00 (ví dụ "2026-11-24T23:59:00+07:00"). Không nói giờ thì để 23:59 ngày đó. TUYỆT ĐỐI không bịa: không suy ra được thời hạn thì han_luc=null.
+Câu của người dùng: "${String(text).replace(/"/g, '“')}"`;
+    const raw = await callGemini(prompt, true, { timeoutMs: CONFIG.aiClassifyTimeoutMs });
+    const m = String(raw || '').match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const o = JSON.parse(m[0]);
+    if (!o || !o.tieu_de) return null;
+    let epoch = null;
+    if (typeof o.han_luc === 'number' && o.han_luc > 1e9) epoch = Math.floor(o.han_luc);
+    else if (typeof o.han_luc === 'string') { const ms = Date.parse(o.han_luc); if (!isNaN(ms)) epoch = Math.floor(ms / 1000); }
+    if (!epoch) return null;
+    return { tieu_de: sohanCap(o.tieu_de), han_luc: epoch };
+  } catch (e) { console.error('[Sổ hạn] AI bóc hạn lỗi:', e.message); return null; }
+}
+function sohanNumberedList(items, nowMs) {
+  return items.map((it, i) => `${i + 1}. ${it.tieu_de} — ⏰ ${fmtSohanDue(it.han_luc)} (${sohanRelLabel(it, nowMs)})`).join('\n');
+}
+async function handleSohanCommand(cmd, chatId, fromName, userId, rawText, now) {
+  const key = sohanPKey(chatId, userId);
+  try {
+    switch (cmd.type) {
+      case 'sohan_list': {
+        const data = await sohanGetOpen();
+        const items = Array.isArray(data && data.items) ? data.items : [];
+        setSohanCache(items);
+        await send(chatId, sohanListText(items, +now));
+        return;
+      }
+      case 'sohan_add': {
+        if (!cmd.title) { await send(chatId, 'Anh/chị muốn ghi hạn cho việc gì? Ví dụ: “bot, hạn: Nộp báo cáo — 24/11 17:00”.'); return; }
+        if (cmd.dueEpoch) {
+          const item = await sohanCreate({ tieu_de: cmd.title, han_luc: cmd.dueEpoch });
+          sohanCache = { at: 0, items: null };
+          await send(chatId, `✅ Đã ghi vào Sổ hạn: ${(item && item.tieu_de) || cmd.title}\n⏰ Hạn: ${fmtSohanDue((item && item.han_luc) || cmd.dueEpoch)}\nXem sổ: “bot, sổ hạn”. Xong việc thì báo: “xong <từ khóa>”.`);
+          return;
+        }
+        // Bộ xác định không bóc được → nhờ AI, rồi HỎI LẠI xác nhận (chưa lưu).
+        const aiRes = AI_KEY ? await aiParseSohan(rawText, now) : null;
+        if (aiRes) {
+          setSohanPending(key, { kind: 'confirm_add', title: aiRes.tieu_de, han_luc: aiRes.han_luc });
+          await send(chatId, `Em chưa chắc về thời hạn trong câu này — em hiểu như sau, anh/chị xác nhận giúp em:\n📌 ${aiRes.tieu_de}\n⏰ Hạn: ${fmtSohanDue(aiRes.han_luc)}\nTrả lời “đồng ý” để lưu vào Sổ hạn, “hủy” để bỏ qua (em chờ tối đa 5 phút).`);
+          return;
+        }
+        await send(chatId, 'Em chưa bóc được thời hạn trong câu này. Anh/chị ghi theo mẫu: “bot, hạn: <tên việc> — <thời hạn>”, ví dụ “bot, hạn: Nộp báo cáo — 24/11 17:00”, “bot, hạn: Họp giao ban — thứ 6” hoặc “bot, hạn: Gửi công văn — mai”.');
+        return;
+      }
+      case 'sohan_done': {
+        const data = await sohanGetOpen();
+        const items = Array.isArray(data && data.items) ? data.items : [];
+        const ms = matchSohanItems(items, cmd.keyword);
+        if (!ms.length) { await send(chatId, `Không tìm thấy hạn đang mở nào khớp với “${cmd.keyword}” trong Sổ hạn. Gọi “bot, sổ hạn” để xem lại danh sách.`); return; }
+        if (ms.length > 1) {
+          setSohanPending(key, { kind: 'choose_done', items: ms.map((i) => ({ id: i.id, tieu_de: i.tieu_de, han_luc: i.han_luc })) });
+          await send(chatId, `Có ${ms.length} hạn khớp với “${cmd.keyword}” — anh/chị muốn đóng hạn nào? Trả lời số thứ tự (chờ tối đa 5 phút, “hủy” để thôi):\n${sohanNumberedList(ms, +now)}`);
+          return;
+        }
+        await sohanDone(ms[0].id);
+        sohanCache = { at: 0, items: null };
+        await send(chatId, `🎉 Đã đóng việc trong Sổ hạn: ${ms[0].tieu_de} (hạn ${fmtSohanDue(ms[0].han_luc)}). Cảm ơn anh/chị!`);
+        return;
+      }
+      case 'sohan_move_bad': {
+        await send(chatId, `Em chưa bóc được ngày/giờ mới trong câu dời hạn cho “${cmd.keyword}”. Anh/chị nói rõ ngày/giờ mới giúp em, ví dụ: “dời hạn ${cmd.keyword} sang 28/11 17:00”.`);
+        return;
+      }
+      case 'sohan_move': {
+        const data = await sohanGetOpen();
+        const items = Array.isArray(data && data.items) ? data.items : [];
+        const ms = matchSohanItems(items, cmd.keyword);
+        if (!ms.length) { await send(chatId, `Không tìm thấy hạn đang mở nào khớp với “${cmd.keyword}” trong Sổ hạn. Gọi “bot, sổ hạn” để xem lại danh sách.`); return; }
+        if (ms.length > 1) {
+          setSohanPending(key, { kind: 'choose_move', items: ms.map((i) => ({ id: i.id, tieu_de: i.tieu_de, han_luc: i.han_luc })), newEpoch: cmd.dueEpoch });
+          await send(chatId, `Có ${ms.length} hạn khớp với “${cmd.keyword}” — anh/chị muốn dời hạn nào sang ${fmtSohanDue(cmd.dueEpoch)}? Trả lời số thứ tự (chờ tối đa 5 phút, “hủy” để thôi):\n${sohanNumberedList(ms, +now)}`);
+          return;
+        }
+        const item = await sohanMove(ms[0].id, cmd.dueEpoch);
+        sohanCache = { at: 0, items: null };
+        await send(chatId, `✅ Đã dời hạn “${ms[0].tieu_de}”: ${fmtSohanDue(ms[0].han_luc)} → ${fmtSohanDue((item && item.han_luc) || cmd.dueEpoch)}.`);
+        return;
+      }
+      default: return;
+    }
+  } catch (e) { await sohanApiFail(chatId, e); }
+}
+// Gửi 1 tin gộp tới mọi chat bot đã biết (đúng tập đích mà bản tin sáng 07:45 vẫn gửi:
+// morningBriefingTick cũng vòng qua Object.keys(store.chats)). Trả true nếu có ít nhất
+// một nơi nhận được — chỉ khi đó mới ghi khóa mốc phía máy chủ.
+async function sohanBroadcast(text) {
+  const targets = Object.keys(store.chats || {});
+  if (!targets.length) { console.log('[Sổ hạn] Chưa biết chat nào để gửi nhắc — bỏ qua lượt này.'); return false; }
+  let ok = false;
+  for (const chatId of targets) {
+    try { await send(chatId, text); ok = true; } catch (e) { console.error('[Sổ hạn] Gửi nhắc lỗi:', e.message); }
+  }
+  return ok;
+}
+async function sohanMarkAll(picks) {
+  for (const pk of picks) {
+    try { await sohanReminded(pk.item.id, pk.key); } catch (e) { console.error('[Sổ hạn] Ghi mốc nhắc lỗi:', e.message); }
+  }
+}
+// Động cơ nhắc Sổ hạn — gọi từ reminderTick (mỗi phút; dữ liệu hạn mở làm mới tối đa
+// 5 phút/lần nên nhịp kiểm tra thực tế dày hơn yêu cầu 30 phút rất nhiều).
+// HỢP NHẤT VỚI BẢN TIN SÁNG: sáng ngày LÀM VIỆC, lượt nhắc sáng do chính morningBriefingTick
+// đảm nhiệm (bản tin kèm mục Sổ hạn + ghi mốc sau khi gửi xong, đánh dấu store.sohanMorningDate)
+// nên ở đây lượt sáng ngày làm việc chỉ chạy từ 07:46–08:30 như một đường DỰ PHÒNG khi bản
+// tin bị lỡ (bot khởi động muộn), và bị chặn hẳn nếu bản tin đã ghi mốc hôm nay. Ngày không
+// làm việc (không có bản tin) thì lượt sáng chạy thẳng 07:30–08:30 tại đây. Như vậy không
+// bao giờ có hai tin sáng trùng nội dung.
+async function sohanReminderTick(now) {
+  const nowMs = +now;
+  let items = sohanCache.items;
+  if (!items || Date.now() - sohanCache.at > 5 * 60 * 1000) {
+    items = await refreshSohanCache();
+    if (!items) return; // nền tảng chưa cấu hình/không tới được → bỏ qua lặng lẽ (đã ghi log)
+  }
+  if (!items.length) return;
+  const p = vnParts(nowMs);
+  const officeDay = CONFIG.officeDays.includes(now.getDay());
+  const inMorningWindow = officeDay
+    ? ((p.h === 7 && p.mi >= 46) || (p.h === 8 && p.mi <= 30))
+    : ((p.h === 7 && p.mi >= 30) || (p.h === 8 && p.mi <= 30));
+  let morningPicks = [];
+  if (inMorningWindow && store.sohanMorningDate !== vnDateStr(nowMs)) {
+    morningPicks = chooseSohanReminders(items, nowMs, true).filter((x) => x.kind !== 'SOON');
+  }
+  const morningIds = new Set(morningPicks.map((x) => String(x.item.id)));
+  const soonPicks = chooseSohanReminders(items, nowMs, false).filter((x) => x.kind === 'SOON' && !morningIds.has(String(x.item.id)));
+  if (morningPicks.length) {
+    const KIND_ORDER = ['OD', 'DUE', 'T1', 'T3'];
+    const KIND_LABEL = { OD: '⛔ Đã quá hạn', DUE: '⏰ Hết hạn hôm nay', T1: '📌 Còn 1 ngày nữa', T3: '📌 Còn 3 ngày nữa' };
+    const parts = ['⏰ NHẮC SỔ HẠN CÔNG VIỆC'];
+    for (const kind of KIND_ORDER) {
+      const g = morningPicks.filter((x) => x.kind === kind);
+      if (g.length) parts.push(`${KIND_LABEL[kind]}:\n${g.map((x) => sohanLine(x.item, nowMs)).join('\n')}`);
+    }
+    parts.push('Xong việc nào thì báo: “xong <từ khóa>”. Dời hạn: “dời hạn <từ khóa> sang <ngày mới>”.');
+    if (await sohanBroadcast(parts.join('\n\n'))) {
+      await sohanMarkAll(morningPicks);
+      store.sohanMorningDate = vnDateStr(nowMs); saveStore();
+    }
+  }
+  if (soonPicks.length) {
+    const text = `⏰ SẮP ĐẾN HẠN — các hạn sau chỉ còn chưa đầy 3 giờ:\n${soonPicks.map((x) => sohanLine(x.item, nowMs)).join('\n')}\nXong việc nào thì báo: “xong <từ khóa>”.`;
+    if (await sohanBroadcast(text)) await sohanMarkAll(soonPicks);
+  }
+}
+
 // ============================== BẢN TIN SÁNG (v3.3) ==============================
 // Mỗi sáng ngày làm việc lúc 07:45 bot tự gửi vào từng chat có việc mở: việc quá hạn +
 // việc đến hạn hôm nay + việc đến hạn ngày mai. Không có việc nào trong 3 nhóm thì im lặng.
 // Gọi "bot, việc hôm nay" để xem ngay bất cứ lúc nào (không cần chờ 07:45).
 function briefingText(chatId, now) {
   const list = openTasks(chatId).sort((a, b) => new Date(a.due) - new Date(b.due));
-  if (!list.length) return null;
+  const sohanSec = sohanBriefingSection(now); // v3.12: mục Sổ hạn (chỉ xem; null khi chưa nạp được dữ liệu hạn)
+  if (!list.length && !sohanSec) return null;
   const tomorrow = atTime(addDays(now, 1), [0, 0]);
   const dayAfter = atTime(addDays(now, 2), [0, 0]);
   const overdue = list.filter((t) => +new Date(t.due) < +now);
   const today = list.filter((t) => +new Date(t.due) >= +now && +new Date(t.due) < +tomorrow);
   const next = list.filter((t) => +new Date(t.due) >= +tomorrow && +new Date(t.due) < +dayAfter);
-  if (!overdue.length && !today.length && !next.length) return null;
+  if (!overdue.length && !today.length && !next.length && !sohanSec) return null;
   const line = (t) => `• ${t.title} — ⏰ ${fmtDT(new Date(t.due))}${t.assignee ? ` — 👤 ${t.assignee}` : ''}${t.recur ? ' 🔁' : ''}`;
   const dayLabel = fmtDT(now).split(' ').slice(0, 3).join(' ');
   const parts = [`☀️ BẢN TIN VIỆC SÁNG — ${dayLabel}`];
   if (overdue.length) parts.push(`⛔ Quá hạn (${overdue.length}):\n${overdue.map(line).join('\n')}`);
   if (today.length) parts.push(`📌 Đến hạn hôm nay (${today.length}):\n${today.map(line).join('\n')}`);
   if (next.length) parts.push(`🔜 Đến hạn ngày mai (${next.length}):\n${next.map(line).join('\n')}`);
+  if (sohanSec) parts.push(sohanSec);
   parts.push('Xong việc nào thì báo: “bot, xong …” theo số trong danh sách việc (“bot, việc”).');
   return parts.join('\n\n');
 }
@@ -567,9 +1048,22 @@ async function morningBriefingTick(now) {
   const today = now.toDateString();
   if (store.briefingLast === today) return;
   store.briefingLast = today; saveStore();
+  // v3.12: bản tin sáng ngày làm việc CHÍNH LÀ lượt nhắc sáng của Sổ hạn — nạp hạn mở mới
+  // nhất để mục Sổ hạn trong bản tin là dữ liệu tươi, gửi xong mới ghi khóa mốc sáng
+  // (T3/T1/DUE/OD) phía máy chủ và đánh dấu store.sohanMorningDate để sohanReminderTick
+  // không gửi thêm một tin sáng trùng nữa.
+  const sohanItems = await refreshSohanCache();
+  const morningMarks = sohanItems ? chooseSohanReminders(sohanItems, +now, true).filter((x) => x.kind !== 'SOON') : [];
+  let sentAny = false;
   for (const chatId of Object.keys(store.chats)) {
     const text = briefingText(chatId, now);
-    if (text) await send(chatId, text).catch((e) => console.error('send briefing:', e.message));
+    if (text) {
+      try { await send(chatId, text); sentAny = true; } catch (e) { console.error('send briefing:', e.message); }
+    }
+  }
+  if (sohanItems) {
+    if (sentAny && morningMarks.length) await sohanMarkAll(morningMarks);
+    if (sentAny || morningMarks.length === 0) { store.sohanMorningDate = vnDateStr(+now); saveStore(); }
   }
 }
 
@@ -1782,6 +2276,7 @@ const HELP = `Cách dùng Bot Báo việc:
 • Giao cho người khác: “bot, ghi việc giao cho anh Tùng: Kiểm tra máy in, hạn mai 9h”
 • Xem việc: “bot, việc”
 • Bản tin sáng: mỗi sáng thứ 2–6 lúc 07:45 bot tự gửi việc đến hạn hôm nay + việc quá hạn; gọi “bot, việc hôm nay” để xem ngay lúc nào cũng được
+• SỔ HẠN CÔNG VIỆC (hạn lưu trên nền tảng Mặt trận số): ghi hạn “bot, hạn: Nộp báo cáo — 24/11 17:00” (không ghi giờ thì hạn 23:59 ngày đó); xem sổ “bot, sổ hạn”; đóng việc “xong nộp báo cáo”; dời hạn “dời hạn nộp báo cáo sang 28/11”. Bot tự nhắc sáng theo mốc còn 3 ngày / còn 1 ngày / hết hạn hôm nay / quá hạn mỗi ngày, nhắc thêm trước hạn ~3 giờ, và bản tin sáng có mục hạn hôm nay/sắp tới
 • Xong việc: “bot, xong 2” (số theo danh sách)
 • Đổi hạn: “bot, sửa hạn 2 sang thứ 3 tuần sau” — viết: “bot, sửa hạn 2 thứ 3”
 • Xóa việc: “bot, xóa 2”
@@ -1842,6 +2337,9 @@ async function handleMessage(msg) {
     }
   }
 
+  // Sổ hạn (v3.12): câu trả lời cho một chờ xác nhận/chọn của Sổ hạn đi trước mọi luồng chờ khác.
+  if (await handleSohanPending(text, chatId, fromName, userId)) return;
+
   // Lệnh đăng bài (v3.2): nhận diện bằng luật cứng, xử lý TRƯỚC lớp AI — lệnh đăng không được phép mơ hồ.
   const pc = parsePostCommand(text, msg.chat?.chat_type === 'PRIVATE');
   if (pc) { await handlePostOrder(pc, chatId, fromName, userId); return; }
@@ -1860,6 +2358,9 @@ async function handleMessage(msg) {
 
   const cmd = parseCommand(text, now);
   console.log(`[lệnh] chat=${chatId} → ${cmd.type}`);
+  // Sổ hạn (v3.12): lệnh cứng riêng — xử lý ngay tại đây, không qua lớp AI chung
+  // (hạn lưu trên nền tảng, không lẫn với việc nội bộ của bot).
+  if (cmd.type.startsWith('sohan_')) { await handleSohanCommand(cmd, chatId, fromName, userId, text, now); return; }
   // Lệnh cứng rõ ràng thì chạy ngay (nhanh, miễn phí). Câu mơ hồ / nói tự nhiên / hỏi đáp → nhờ AI hiểu trước;
   // AI lỗi hoặc không có khóa thì quay về hành vi lệnh cứng như cũ.
   const ruleStrong = isRuleStrong(cmd);
@@ -1926,6 +2427,7 @@ async function handleMessage(msg) {
 async function reminderTick() {
   const now = new Date();
   await morningBriefingTick(now);
+  await sohanReminderTick(now).catch((e) => console.error('[Sổ hạn] sohanReminderTick:', e.message));
   await watchdogTick(now);
   // Tự cập nhật (v3.6): tới hạn 6 giờ thì kiểm tra bản mới 1 lần (lần đầu do main() gọi lúc khởi động).
   if (Date.now() - lastUpdateCheckAt > CONFIG.updateCheckMs) { lastUpdateCheckAt = Date.now(); checkForUpdate(null).catch((e) => console.error('[Cập nhật] Lỗi:', e.message)); }
@@ -2045,4 +2547,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });
-module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, enqueueChatWork, store, CONFIG };
+module.exports = { foldVN, parseDeadline, parseCommand, parseAddCommand, parseSohanDeadline, parseSohanAdd, matchSohanItems, sohanMilestones, chooseSohanReminders, fmtSohanDue, vnDateStr, vnDayDiff, sohanListText, sohanBriefingSection, setSohanCache, loadSohanConfig, setSohanTestDeps, sohanGetOpen, sohanCreate, sohanDone, sohanMove, sohanReminded, sohanReminderTick, isOffice, prevOfficeTime, nextOfficeTime, planReminders, extractUpdates, normName, findUserByName, isStartCommand, parseAiJson, stripHtml, parseBingResults, parseDdgResults, parseGoogleNews, parsePostCommand, findSharedLink, briefingText, morningBriefingTick, detectRecur, advanceDue, watchdogDecision, BOT_VERSION, cmpVersion, validManifest, sha256hex, isFailedVersion, handleViaAI, parseFxXml, fxText, fxCodeOf, wmoText, weatherText, parseNewsItems, newsText, isLookupQuestion, isRuleStrong, enqueueChatWork, store, CONFIG };

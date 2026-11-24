@@ -233,7 +233,7 @@ morningBriefingTick(new Date(2026, 10, 16, 9, 0)).then(() => {
   assert.strictEqual(WD({ nowMs: T0, jobAtMs: T0 - 15 * 60e3, lastPollAt: 0, lastLaunchAt: 0, chromeRunning: true, warned: true }), 'none');          // đã cảnh báo rồi → thôi
 
   // --- Tự cập nhật (v3.6) ---
-  assert.strictEqual(BOT_VERSION, '3.11.0');
+  assert.strictEqual(BOT_VERSION, '3.12.0');
   // Chống treo (v3.11): các giới hạn chờ phải tồn tại và vòng nghe tin phải chờ lâu hơn
   // thời gian long-poll phía Zalo (không thì ngắt oan tin đang về).
   assert.ok(CONFIG.apiTimeoutMs >= 10000 && CONFIG.apiTimeoutMs <= 60000);
