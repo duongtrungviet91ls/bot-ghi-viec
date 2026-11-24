@@ -436,9 +436,145 @@ async function maybeReloadForUpdate() {
   } catch (e) {}
 }
 chrome.alarms.create('mttqBridgePoll', { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'mttqBridgePoll') { bridgeSweep(); bridgePoll(); maybeReloadForUpdate(); } });
-chrome.runtime.onStartup.addListener(() => bridgePoll());
-chrome.runtime.onInstalled.addListener(() => bridgePoll());
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name === 'mttqBridgePoll') { bridgeSweep(); bridgePoll(); maybeReloadForUpdate(); }
+  if (a.name === 'mttqRadar') radarScan(false);
+});
+chrome.runtime.onStartup.addListener(() => { bridgePoll(); radarScan(false); });
+chrome.runtime.onInstalled.addListener(() => { bridgePoll(); radarScan(false); });
+
+// ----- Radar bài mới + quét từ khóa (v2.42) -----
+// Mỗi 15 phút (alarm mttqRadar) background tải trang chủ 3 báo, trích link bài viết theo
+// mẫu URL của từng báo (chốt từ mẫu trang thật 24/11), đối chiếu sổ radarSeen: bài CHƯA
+// TỪNG THẤY mà tiêu đề trúng từ khóa (đặt trong Cài đặt — radarCfg) thì ghi vào radarHits,
+// hiện thông báo trên máy + nhắn Zalo cá nhân qua bot nội bộ (nếu đã cấu hình), và hiện
+// trong popup để đăng 1 chạm. Lần quét ĐẦU TIÊN chỉ gieo hạt: ghi mọi link hiện có vào sổ
+// đã thấy, không báo gì — tránh dội bom thông báo bài cũ. Khớp từ khóa theo tiêu đề trên
+// trang chủ, không tải từng bài. Chỉ chạy khi Chrome đang mở (giới hạn của extension).
+// [RADAR-SECTION]
+const RADAR_SOURCES = [
+  { key: 'bls', name: 'Báo Lạng Sơn', home: 'https://baolangson.vn/', base: 'https://baolangson.vn', pat: /^\/[^/]+-\d{5,}\.html$/ },
+  { key: 'ddk', name: 'Đại Đoàn Kết', home: 'https://daidoanket.vn/', base: 'https://daidoanket.vn', pat: /^\/(?!chuyen-muc\/)[^/]{25,}\.html$/ },
+  { key: 'dt', name: 'Dân Trí', home: 'https://dantri.com.vn/', base: 'https://dantri.com.vn', pat: /^https:\/\/dantri\.com\.vn\/[^/]+\/[^/]+-\d{10,}\.htm$/ }
+];
+const RADAR_DEFAULT_KEYWORDS = ['Mặt trận', 'MTTQ', 'Đại đoàn kết'];
+// Bỏ dấu tiếng Việt + thường hóa để khớp từ khóa không phụ thuộc dấu/hoa thường.
+function radarFold(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'd');
+}
+function radarEntities(s) {
+  return String(s || '')
+    .replace(/&quot;/g, '"').replace(/&#0?39;|&apos;|&rsquo;/g, "'").replace(/&ldquo;|&rdquo;/g, '"')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#(\d+);/g, (m, n) => String.fromCharCode(+n))
+    .replace(/&amp;/g, '&');
+}
+// Trích {url, title, source} từ HTML trang chủ: duyệt mọi thẻ <a>, lọc href theo mẫu của
+// báo, tiêu đề lấy từ chữ trong thẻ (bỏ thẻ con, giải mã thực thể, gọt dấu đầu dòng kiểu
+// "• "); thiếu chữ thì lấy thuộc tính title. Trùng URL giữ tiêu đề DÀI NHẤT (trang chủ có
+// cả thẻ bọc ảnh — title ngắn — lẫn thẻ tiêu đề đầy đủ cho cùng 1 bài).
+function radarExtract(html, src) {
+  const byUrl = new Map();
+  const re = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const attrs = m[1];
+    const hm = attrs.match(/href="([^"]+)"/i);
+    if (!hm) continue;
+    const href = hm[1];
+    if (!src.pat.test(href)) continue;
+    const url = href.startsWith('http') ? href : src.base + href;
+    let title = radarEntities(m[2].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().replace(/^[•·\-–—\s]+/, '');
+    if (title.length < 15) {
+      const tm = attrs.match(/title="([^"]+)"/i);
+      const t2 = tm ? radarEntities(tm[1]).replace(/\s+/g, ' ').trim() : '';
+      if (t2.length > title.length) title = t2;
+    }
+    if (title.length < 15) continue;
+    const cur = byUrl.get(url);
+    if (!cur || title.length > cur.title.length) byUrl.set(url, { url: url, title: title, source: src.name });
+  }
+  return Array.from(byUrl.values());
+}
+// Trả danh sách từ khóa (nguyên dạng đã đặt) trúng trong tiêu đề.
+function radarMatch(title, keywords) {
+  const ft = radarFold(title);
+  return (keywords || []).filter((k) => { const fk = radarFold(k).trim(); return fk.length >= 2 && ft.includes(fk); });
+}
+// [/RADAR-SECTION]
+
+// Nhắn Zalo cá nhân qua bot nội bộ — cùng cách của thông báo đăng bài xong (v2.13).
+async function botZaloSend(text) {
+  try {
+    const { zaloBotNotify } = await chrome.storage.local.get(['zaloBotNotify']);
+    if (!zaloBotNotify || !zaloBotNotify.token || !zaloBotNotify.chatId) return false;
+    const r = await fetch('https://bot-api.zaloplatforms.com/bot' + zaloBotNotify.token + '/sendMessage', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: zaloBotNotify.chatId, text: text.slice(0, 2000) })
+    });
+    const d = await r.json().catch(() => null);
+    return !!(r.ok && d && d.ok !== false);
+  } catch (e) { return false; }
+}
+
+let radarBusy = false;
+async function radarScan(manual) {
+  if (radarBusy) return { busy: true };
+  radarBusy = true;
+  try {
+    const st = await chrome.storage.local.get(['radarCfg', 'radarSeen', 'radarHits']);
+    let cfg = st.radarCfg;
+    if (!cfg) { cfg = { enabled: true, keywords: RADAR_DEFAULT_KEYWORDS.slice() }; await chrome.storage.local.set({ radarCfg: cfg }); }
+    if (!cfg.enabled && !manual) return { skipped: 'disabled' };
+    const keywords = (cfg.keywords || []).filter((k) => radarFold(k).trim().length >= 2);
+    const seeding = !st.radarSeen;
+    const seen = st.radarSeen || {};
+    const now = Date.now();
+    let found = 0;
+    const fresh = [];
+    for (const src of RADAR_SOURCES) {
+      try {
+        const r = await fetch(src.home, { credentials: 'omit' });
+        if (!r.ok) continue;
+        const items = radarExtract(await r.text(), src);
+        found += items.length;
+        for (const it of items) {
+          if (seen[it.url]) { seen[it.url] = now; continue; }
+          seen[it.url] = now;
+          if (!seeding) fresh.push(it);
+        }
+      } catch (e) { /* 1 báo lỗi không làm hỏng cả lượt quét */ }
+    }
+    const keys = Object.keys(seen);
+    if (keys.length > 900) { keys.sort((a, b) => seen[a] - seen[b]); for (const k of keys.slice(0, keys.length - 700)) delete seen[k]; }
+    const newHits = [];
+    if (!seeding) {
+      for (const it of fresh) {
+        const kw = radarMatch(it.title, keywords);
+        if (kw.length) newHits.push({ url: it.url, title: it.title, source: it.source, kw: kw, at: now });
+      }
+    }
+    const hits = newHits.length ? newHits.concat(st.radarHits || []).slice(0, 50) : (st.radarHits || []);
+    await chrome.storage.local.set({ radarSeen: seen, radarHits: hits, radarLast: { at: now, found: found, fresh: fresh.length, matched: newHits.length, seeded: seeding } });
+    if (newHits.length) {
+      await chrome.storage.local.set({ radarLastHitUrl: newHits[0].url });
+      try {
+        chrome.notifications.create('mttq-radar-' + now, {
+          type: 'basic', iconUrl: 'icons/icon128.png',
+          title: '📡 Radar: ' + newHits.length + ' bài mới trúng từ khóa',
+          message: newHits.slice(0, 3).map((h) => h.title).join('\n') + (newHits.length > 3 ? '\n… và ' + (newHits.length - 3) + ' bài nữa — mở popup của extension để xem.' : ''),
+          priority: 1
+        });
+      } catch (e) {}
+      const lines = newHits.slice(0, 8).map((h, i) => (i + 1) + '. ' + h.title + ' (' + h.source + ')\n' + h.url);
+      await botZaloSend('📡 Radar bài mới: ' + newHits.length + ' bài trúng từ khóa\n' + lines.join('\n') +
+        (newHits.length > 8 ? '\n… và ' + (newHits.length - 8) + ' bài nữa.' : '') + '\nMở popup của extension trên máy tính để đăng ngay.');
+    }
+    return { seeded: seeding, found: found, fresh: fresh.length, matched: newHits.length };
+  } catch (e) {
+    return { error: String(e && e.message || e) };
+  } finally { radarBusy = false; }
+}
+chrome.alarms.create('mttqRadar', { periodInMinutes: 15 });
 
 // ----- Sổ log đợt đăng gần nhất (v2.32) -----
 // Mỗi job khép lại (xong / lỗi / dừng khẩn cấp) thì chụp toàn bộ log của nó vào `lastRun`,
@@ -467,6 +603,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === 'BRIDGE_POLL_NOW') {
         bridgePoll();
         sendResponse({ ok: true });
+      } else if (msg.type === 'RADAR_SCAN_NOW') {
+        const summary = await radarScan(true);
+        sendResponse({ ok: true, summary: summary });
       } else if (msg.type === 'FETCH_TEXT') {
         const r = await fetch(msg.url, { credentials: msg.credentials || 'omit', redirect: 'follow' });
         const text = await r.text();
@@ -640,8 +779,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // giữ kênh async
 });
 
-// Bấm vào thông báo "đã xong" -> mở bài vừa đăng (hoặc trang đích tương ứng)
+// Bấm vào thông báo "đã xong" -> mở bài vừa đăng (hoặc trang đích tương ứng);
+// bấm vào thông báo radar -> mở bài mới nhất vừa trúng từ khóa.
 chrome.notifications.onClicked.addListener(async (notifId) => {
+  if (notifId.startsWith('mttq-radar-')) {
+    try {
+      const { radarLastHitUrl } = await chrome.storage.local.get(['radarLastHitUrl']);
+      if (radarLastHitUrl) await chrome.tabs.create({ url: radarLastHitUrl, active: true });
+    } catch (e) {}
+    try { chrome.notifications.clear(notifId); } catch (e) {}
+    return;
+  }
   if (!notifId.startsWith('mttq-done-')) return;
   try {
     const { lastDoneUrl } = await chrome.storage.local.get(['lastDoneUrl']);

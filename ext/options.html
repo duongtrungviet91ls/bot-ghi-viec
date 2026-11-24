@@ -58,6 +58,17 @@
     <button id="bridgeClear" type="button">Tắt</button>
   </div>
   <div id="bridgeMsg" style="margin-top:12px;color:#276738"></div>
+
+  <h1 style="margin-top:30px">Radar bài mới + quét từ khóa</h1>
+  <p>Extension tự quét trang chủ <b>Báo Lạng Sơn, Đại Đoàn Kết và Dân Trí</b> mỗi 15 phút (khi Chrome đang mở). Bài <b>mới</b> nào có tiêu đề chứa một trong các từ khóa dưới đây sẽ được báo về Zalo cá nhân (nếu đã cấu hình bot ở mục trên) + thông báo trên máy, và hiện trong popup để đăng 1 chạm. Khớp từ khóa không phân biệt hoa thường và dấu. Lần quét đầu tiên chỉ ghi nhận các bài hiện có làm mốc — từ lần sau mới báo bài mới thật.</p>
+  <label style="font-weight:normal"><input id="radarEnabled" type="checkbox" style="width:auto"> Bật radar</label>
+  <label for="radarKeywords">Từ khóa (mỗi từ khóa 1 dòng)</label>
+  <textarea id="radarKeywords" rows="4" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid #bbb;border-radius:6px;font:inherit"></textarea>
+  <div>
+    <button id="radarSave" type="button" style="background:#BE1E2D;color:#fff">Lưu radar</button>
+    <button id="radarScanNow" type="button">Quét ngay 1 lần</button>
+  </div>
+  <div id="radarMsg" style="margin-top:12px;color:#276738"></div>
   <script src="options.js"></script>
 </body>
 </html>

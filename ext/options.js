@@ -19,6 +19,33 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
 });
 
+// ---- Radar bài mới + quét từ khóa (v2.42) ----
+document.addEventListener('DOMContentLoaded', async () => {
+  const { radarCfg } = await chrome.storage.local.get(['radarCfg']);
+  const cfg = radarCfg || { enabled: true, keywords: ['Mặt trận', 'MTTQ', 'Đại đoàn kết'] };
+  $('radarEnabled').checked = cfg.enabled !== false;
+  $('radarKeywords').value = (cfg.keywords || []).join('\n');
+  if (radarCfg) $('radarMsg').textContent = 'Đã có cấu hình radar được lưu.';
+  $('radarSave').onclick = async () => {
+    const keywords = $('radarKeywords').value.split('\n').map(s => s.trim()).filter(Boolean);
+    await chrome.storage.local.set({ radarCfg: { enabled: $('radarEnabled').checked, keywords: keywords } });
+    $('radarMsg').textContent = '✔ Đã lưu. Radar quét mỗi 15 phút khi Chrome mở' + (keywords.length ? ' — đang theo dõi ' + keywords.length + ' từ khóa.' : ' — chưa có từ khóa nào thì bài mới sẽ không được báo (vẫn ghi nhận mốc).');
+  };
+  $('radarScanNow').onclick = async () => {
+    $('radarMsg').textContent = 'Đang quét 3 báo…';
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'RADAR_SCAN_NOW' });
+      const s = (r && r.summary) || {};
+      if (s.busy) $('radarMsg').textContent = 'Đang có 1 lượt quét khác chạy — chờ chút rồi mở popup xem kết quả.';
+      else if (s.error) $('radarMsg').textContent = 'Quét lỗi: ' + s.error;
+      else if (s.seeded) $('radarMsg').textContent = '✔ Quét xong lần đầu: đã ghi nhận ' + s.found + ' bài hiện có làm mốc — từ lần quét sau mới báo bài mới.';
+      else $('radarMsg').textContent = '✔ Quét xong: ' + s.found + ' link trên trang chủ, ' + s.fresh + ' bài mới, ' + s.matched + ' bài trúng từ khóa' + (s.matched ? ' — xem trong popup của extension.' : '.');
+    } catch (e) {
+      $('radarMsg').textContent = 'Không gọi được lượt quét: ' + (e && e.message || e);
+    }
+  };
+});
+
 // ---- Thông báo về Zalo cá nhân qua Bot nội bộ (v2.13) ----
 document.addEventListener('DOMContentLoaded', async () => {
   const botApi = (token, method) => 'https://bot-api.zaloplatforms.com/bot' + token + '/' + method;

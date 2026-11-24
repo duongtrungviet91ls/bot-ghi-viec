@@ -199,6 +199,70 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('url').addEventListener('input', () => { clearTimeout(lcTimer); lcTimer = setTimeout(lcRun, 700); });
   lcRun(); // mở popup là kiểm tra luôn các link đang có sẵn (từ bản nháp hoặc tab hiện tại)
 
+  // ---------- Radar bài mới + quét từ khóa (v2.42) ----------
+  // background quét trang chủ 3 báo mỗi 15 phút; bài mới trúng từ khóa nằm trong radarHits.
+  // Mỗi bài: "Đăng bài này" = điền link vào ô rồi bấm nút Đăng hộ (đang có việc chạy thì chỉ
+  // điền sẵn, không chen ngang), "Mở bài" xem trước, "Bỏ qua" xóa khỏi danh sách.
+  const rdHitsBox = $('radarHits'), rdMeta = $('radarMeta');
+  function rdTime(ts) {
+    const d = new Date(ts), p = (n) => String(n).padStart(2, '0');
+    return p(d.getDate()) + '/' + p(d.getMonth() + 1) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  async function rdRender() {
+    const { radarHits, radarLast, radarCfg } = await chrome.storage.local.get(['radarHits', 'radarLast', 'radarCfg']);
+    const hits = radarHits || [];
+    if (radarCfg && radarCfg.enabled === false) rdMeta.textContent = 'Radar đang TẮT — bật lại trong Cài đặt (mục Radar bài mới).';
+    else if (radarLast) rdMeta.textContent = 'Quét gần nhất ' + rdTime(radarLast.at) + ': ' + radarLast.found + ' link, ' + radarLast.fresh + ' bài mới, ' + radarLast.matched + ' trúng từ khóa.';
+    else rdMeta.textContent = 'Radar chưa quét lần nào — bấm “Quét ngay”. Lần đầu chỉ ghi mốc, chưa báo bài.';
+    rdHitsBox.textContent = '';
+    if (!hits.length) { rdHitsBox.appendChild(lcEl('div', 'lc-meta', 'Chưa có bài nào trúng từ khóa.')); return; }
+    hits.slice(0, 8).forEach(h => {
+      const item = lcEl('div', 'lc-item ok');
+      item.appendChild(lcEl('div', 'lc-title', h.title));
+      item.appendChild(lcEl('div', 'lc-meta', h.source + ' • ' + rdTime(h.at) + ((h.kw && h.kw.length) ? ' • từ khóa: ' + h.kw.join(', ') : '')));
+      const row = lcEl('div', 'lc-badges');
+      const post = lcEl('a', '', 'Đăng bài này');
+      post.style.fontWeight = 'bold';
+      post.onclick = async () => {
+        $('url').value = h.url;
+        try { chrome.storage.local.set({ linkDraft: h.url }); } catch (e) {}
+        lcRun();
+        const st = await chrome.storage.local.get(['job', 'queue']);
+        if ((st.job && st.job.active) || (st.queue && st.queue.active)) {
+          $('status').textContent = 'Đã điền link bài radar vào ô — đang có việc đăng chạy, chờ xong rồi bấm “Đăng bài ngay” anh nhé.';
+          return;
+        }
+        $('go').click();
+      };
+      const open = lcEl('a', '', 'Mở bài');
+      open.href = h.url; open.target = '_blank';
+      const del = lcEl('a', '', 'Bỏ qua');
+      del.onclick = async () => {
+        const cur = (await chrome.storage.local.get(['radarHits'])).radarHits || [];
+        await chrome.storage.local.set({ radarHits: cur.filter(x => x.url !== h.url) });
+        rdRender();
+      };
+      row.appendChild(post);
+      row.appendChild(document.createTextNode(' · '));
+      row.appendChild(open);
+      row.appendChild(document.createTextNode(' · '));
+      row.appendChild(del);
+      item.appendChild(row);
+      rdHitsBox.appendChild(item);
+    });
+    if (hits.length > 8) rdHitsBox.appendChild(lcEl('div', 'lc-meta', '… và ' + (hits.length - 8) + ' bài nữa (lưu tối đa 50 bài gần nhất).'));
+  }
+  $('radarScan').onclick = async () => {
+    rdMeta.textContent = 'Đang quét 3 báo…';
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'RADAR_SCAN_NOW' });
+      if (r && r.summary && r.summary.seeded) $('status').textContent = 'Radar vừa ghi nhận các bài hiện có làm mốc — từ lần quét sau mới báo bài mới.';
+    } catch (e) {}
+    rdRender();
+  };
+  $('radarClear').onclick = async () => { await chrome.storage.local.set({ radarHits: [] }); rdRender(); };
+  rdRender();
+
   $('stop').onclick = async () => {
     $('stop').disabled = true;
     try { await chrome.runtime.sendMessage({ type: 'EMERGENCY_STOP' }); } catch (e) {}
